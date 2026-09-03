@@ -23,7 +23,7 @@ Written so an interrupted session — or you tomorrow — can pick it up cold.
 - [x] Share: text, image card, `.ics`, subscribable feed with revocation
 - [x] Optional AI tier (off by default, no key needed)
 - [x] Front end: capture / dates / imports / settings, light + dark
-- [x] End-to-end test suite
+- [x] End-to-end test suite (82 tests)
 
 ## Not done (deliberate — see README "Not in this version")
 
@@ -33,13 +33,33 @@ Written so an interrupted session — or you tomorrow — can pick it up cold.
 - [ ] Service worker / offline queueing of photos taken away from the Mac
 - [ ] Screen-reader labelling is thin
 
+## Reviewed and hardened
+
+Two agents attacked the build: an adversarial QA pass and a UX review against the
+personas. Everything they found that mattered is fixed and covered by tests.
+
+Worst bug found: **"Contract ends December 2031" invented 20 December 2025** at 94%
+confidence — the day pattern was eating the first two digits of the year. It also
+silently "rescued" impossible dates (29 February 2027 became 20 February 2026).
+That is precisely the confident-error failure the whole design exists to prevent.
+
+Also fixed: a huge date shift could write NaN dates that then broke every calendar
+export; `apply-diff` accepted unreviewed items and could overwrite an unrelated
+batch; deleting a re-imported batch destroyed its image then failed on a foreign
+key; arbitrary iCalendar properties could be injected through a repeat rule; redo
+resurrected items the user had deliberately rejected; `;` was never escaped in
+.ics output (`'\\;'` is just `';'` in JavaScript); a share with no scope published
+the entire calendar; and any web page could POST to the server and switch on AI
+uploading. Contrast failures in dark mode (the primary button measured 2.38:1)
+and the missing fast path are fixed too.
+
 ## Known rough edges
 
 - Titles occasionally keep a stray word from a merged table row.
-- The confirm-card fast path still shows the source image above it; for a
-  one-date poster that is arguably one scroll too many.
-- The subscribable share feed is created by the API but is not surfaced as a
-  button in the share dialog yet.
+- Screen-reader support is improved but still thin: the review list rebuilds on
+  every selection, which moves focus.
+- Timed events are exported as floating time with no TZID, so a shared .ics
+  shifts for a recipient in another timezone.
 - Real-world school PDFs will be messier than the synthetic fixtures.
 
 ## To pick this up again

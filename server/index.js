@@ -51,6 +51,47 @@ const routes = [
   })],
 ];
 
+const MUTATING = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
+
+/**
+ * KevCal binds to the LAN so a phone can reach it, which also means any page in
+ * any browser on that network can send it requests. Two cheap checks close the
+ * cross-site hole without breaking the app's own fetches:
+ *
+ *  - a mutating API call must declare `application/json`, which a cross-origin
+ *    form or `text/plain` POST cannot do without triggering a preflight;
+ *  - if an Origin header is present it must match the host being addressed.
+ *
+ * Without this, any site the user visits could flip on AI uploading, delete
+ * their imports, or publish a share link.
+ */
+function crossSiteRejected(req, res, pathname) {
+  if (!MUTATING.has(req.method)) return false;
+  if (!pathname.startsWith('/api/')) return false;
+
+  const origin = req.headers.origin;
+  if (origin) {
+    let originHost = null;
+    try { originHost = new URL(origin).host; } catch { originHost = null; }
+    if (!originHost || originHost !== req.headers.host) {
+      json(res, 403, { error: 'cross-site request refused' });
+      return true;
+    }
+  }
+
+  // Only meaningful when there is a body to mis-declare; commit and undo are
+  // bodyless POSTs and are covered by the Origin check above.
+  const hasBody = Number(req.headers['content-length'] || 0) > 0 || !!req.headers['transfer-encoding'];
+  if (hasBody) {
+    const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (type !== 'application/json') {
+      json(res, 415, { error: 'send this as application/json' });
+      return true;
+    }
+  }
+  return false;
+}
+
 function matchRoute(method, pathname) {
   for (const [m, pattern, handler] of routes) {
     if (m !== method) continue;
@@ -79,6 +120,8 @@ const server = http.createServer(async (req, res) => {
       const isICS = raw.endsWith('.ics');
       return api.serveShare(req, res, isICS ? raw.slice(0, -4) : raw, isICS);
     }
+
+    if (crossSiteRejected(req, res, pathname)) return;
 
     const route = matchRoute(req.method, pathname);
     if (route) return await route.handler(req, res, route.params, url);

@@ -79,6 +79,63 @@ func imageFromFile(_ url: URL) -> CGImage? {
     return ns.cgImage(forProposedRect: &rect, context: nil, hints: nil)
 }
 
+// MARK: - PDF text layer
+
+/// A PDF that carries real text should never be OCR'd — OCR of a rendered page
+/// introduces errors (2027 -> 2021) that the embedded text does not have.
+///
+/// Text comes from `page.string`, which is exact. Geometry comes from clustering
+/// character bounds. The two indexings drift (PDFKit's string contains newline
+/// characters that `numberOfCharacters` does not count), so they are only zipped
+/// together when the counts agree; otherwise the text is kept and the boxes fall
+/// back to evenly spaced bands. Correct text matters more than a perfect box.
+func textLayerLines(_ page: PDFPage) -> [Line]? {
+    guard let whole = page.string,
+          whole.trimmingCharacters(in: .whitespacesAndNewlines).count > 20 else { return nil }
+
+    let textLines = whole
+        .components(separatedBy: CharacterSet.newlines)
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+    guard textLines.count >= 2 else { return nil }
+
+    let bounds = page.bounds(for: .mediaBox)
+    guard bounds.width > 0, bounds.height > 0 else { return nil }
+
+    var clusters: [CGRect] = []
+    for i in 0..<page.numberOfCharacters {
+        let b = page.characterBounds(at: i)
+        if b.isNull || b.isInfinite || b.height <= 0 || b.width <= 0 { continue }
+        if let last = clusters.last,
+           abs(last.midY - b.midY) <= max(last.height, b.height) * 0.6 {
+            clusters[clusters.count - 1] = last.union(b)
+        } else {
+            clusters.append(b)
+        }
+    }
+    clusters.sort { $0.midY > $1.midY }
+
+    let aligned = clusters.count == textLines.count
+    var lines: [Line] = []
+    for (idx, t) in textLines.enumerated() {
+        var bbox: [Double]
+        if aligned {
+            let r = clusters[idx]
+            bbox = [
+                Double((r.minX - bounds.minX) / bounds.width),
+                Double(1.0 - ((r.maxY - bounds.minY) / bounds.height)),
+                Double(r.width / bounds.width),
+                Double(r.height / bounds.height),
+            ]
+        } else {
+            let n = Double(textLines.count)
+            bbox = [0.05, Double(idx) / n, 0.90, 1.0 / n]
+        }
+        lines.append(Line(text: t, confidence: 1.0, bbox: bbox))
+    }
+    return lines
+}
+
 // MARK: - Recognition
 
 func recognise(_ image: CGImage, fast: Bool, languages: [String]) -> [Line] {
@@ -133,26 +190,40 @@ guard let path, FileManager.default.fileExists(atPath: path) else {
 let url = URL(fileURLWithPath: path)
 let isPDF = url.pathExtension.lowercased() == "pdf"
 
-var images: [CGImage] = []
+var pages: [Page] = []
+var engineUsed = "vision"
+
+let pageLimit = 40
+
 if isPDF {
-    images = imagesFromPDF(url, scale: 2.0)
-    if images.isEmpty { fail("could not render any page of the PDF") }
+    guard let doc = PDFDocument(url: url) else { fail("could not open the PDF") }
+    if doc.pageCount == 0 { fail("the PDF has no pages") }
+    var usedTextLayer = false
+    for i in 0..<min(doc.pageCount, pageLimit) {
+        guard let page = doc.page(at: i) else { continue }
+        let bounds = page.bounds(for: .mediaBox)
+        if let lines = textLayerLines(page), lines.count >= 2 {
+            usedTextLayer = true
+            pages.append(Page(page: i + 1, width: Int(bounds.width), height: Int(bounds.height), lines: lines))
+        } else {
+            // Scanned page with no text layer: fall back to OCR.
+            let rendered = imagesFromPDF(url, scale: 2.0)
+            if i < rendered.count {
+                let img = rendered[i]
+                pages.append(Page(page: i + 1, width: img.width, height: img.height,
+                                  lines: recognise(img, fast: fast, languages: languages)))
+            }
+        }
+    }
+    engineUsed = usedTextLayer ? "pdf-text" : "vision"
+    if pages.isEmpty { fail("could not read any page of the PDF") }
 } else {
     guard let img = imageFromFile(url) else { fail("could not decode image") }
-    images = [img]
+    pages.append(Page(page: 1, width: img.width, height: img.height,
+                      lines: recognise(img, fast: fast, languages: languages)))
 }
 
-// Guard against a 300-page PDF being dropped in by accident.
-let pageLimit = 40
-if images.count > pageLimit { images = Array(images.prefix(pageLimit)) }
-
-var pages: [Page] = []
-for (idx, img) in images.enumerated() {
-    let lines = recognise(img, fast: fast, languages: languages)
-    pages.append(Page(page: idx + 1, width: img.width, height: img.height, lines: lines))
-}
-
-let out = Output(ok: true, engine: "vision", pages: pages, error: nil)
+let out = Output(ok: true, engine: engineUsed, pages: pages, error: nil)
 let encoder = JSONEncoder()
 if let data = try? encoder.encode(out), let s = String(data: data, encoding: .utf8) {
     print(s)

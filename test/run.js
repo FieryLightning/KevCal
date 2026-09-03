@@ -112,6 +112,32 @@ try {
   await api(`/api/batches/${letter.data.batch.id}/redo`, { method: 'POST' });
   check('redo restores them', (await api('/api/agenda')).data.items.length === before);
 
+  console.log('\nundo and redo are symmetric');
+  const pair = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', reference: '2025-09-03',
+    text: 'Book club on 3 October 2025\nPub quiz on 9 October 2025',
+  } });
+  const [keepIt, dropIt] = pair.data.items;
+  await api('/api/items/bulk', { method: 'POST', body: { ids: [dropIt.id], op: 'reject' } });
+  await api(`/api/batches/${pair.data.batch.id}/commit`, { method: 'POST' });
+  await api(`/api/batches/${pair.data.batch.id}/undo`, { method: 'POST' });
+  await api(`/api/batches/${pair.data.batch.id}/redo`, { method: 'POST' });
+  const restored = (await api(`/api/batches/${pair.data.batch.id}`)).data.items;
+  check('redo restores what undo took',
+    restored.find((i) => i.id === keepIt.id)?.status === 'accepted');
+  check('redo does NOT resurrect what the user rejected',
+    restored.find((i) => i.id === dropIt.id)?.status === 'rejected',
+    restored.find((i) => i.id === dropIt.id)?.status);
+  await api(`/api/batches/${pair.data.batch.id}`, { method: 'DELETE' });
+
+  console.log('\ndeleting a re-imported batch');
+  const orig = await captureImage('car-reminder.png');
+  const child = await captureImage('car-reminder.png', { parentBatchId: orig.data.batch.id });
+  const delParent = await api(`/api/batches/${orig.data.batch.id}`, { method: 'DELETE' });
+  check('a batch with a child deletes cleanly', delParent.status === 200, delParent.text.slice(0, 120));
+  check('the child survives', (await api(`/api/batches/${child.data.batch.id}`)).status === 200);
+  await api(`/api/batches/${child.data.batch.id}`, { method: 'DELETE' });
+
   console.log('\nfast path: a simple poster');
   const poster = await captureImage('poster.png');
   check('poster is low risk (three-tap path)', poster.data.risk === 'low', poster.data.risk);
@@ -212,12 +238,61 @@ try {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: '{oops',
   });
   check('malformed JSON rejected cleanly', badJson.status === 400);
+  const csrfForm = await fetch(`${BASE}/api/settings`, {
+    method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{"ai_enabled":true}',
+  });
+  check('cross-site style POST refused', csrfForm.status === 415, String(csrfForm.status));
+  const csrfOrigin = await fetch(`${BASE}/api/settings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: 'http://evil.example' },
+    body: JSON.stringify({ ai_enabled: true }),
+  });
+  check('foreign Origin refused', csrfOrigin.status === 403, String(csrfOrigin.status));
+  check('privacy switch untouched', (await api('/api/settings')).data.ai_enabled === false);
+
+  const invented = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', reference: '2025-09-03', text: 'Contract ends December 2031',
+  } });
+  check('a month+year alone invents no day', invented.data.items.length === 0,
+    JSON.stringify(invented.data.items?.map((i) => i.start_date)));
+  const impossible = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', reference: '2025-09-03', text: 'Review on 29 February 2027 and 31 April 2026',
+  } });
+  check('impossible dates are rejected, not coerced', impossible.data.items.length === 0,
+    JSON.stringify(impossible.data.items?.map((i) => i.start_date)));
+
+  const dentist = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', reference: '2025-09-03', text: 'Dentist on 4 November 2025',
+  } });
+  const dentistId = dentist.data.items[0].id;
+  await api(`/api/batches/${dentist.data.batch.id}/commit`, { method: 'POST' });
+  const wildShift = await api('/api/items/bulk', { method: 'POST', body: { ids: [dentistId], op: 'shift_days', days: 1e9 } });
+  check('an absurd shift is refused', wildShift.status === 400, String(wildShift.status));
+  const badDate = await api(`/api/items/${dentistId}`, { method: 'PATCH', body: { start_date: '9999-99-99' } });
+  check('an impossible date is refused', badDate.status === 400, String(badDate.status));
+  const backwards = await api(`/api/items/${dentistId}`, { method: 'PATCH', body: { start_date: '2026-05-20', end_date: '2026-05-14' } });
+  check('an end before a start is refused', backwards.status === 400, String(backwards.status));
+  const stillFine = await fetch(`${BASE}/api/export.ics`);
+  check('the whole-calendar export still works', stillFine.status === 200, String(stillFine.status));
+
+  const inject = await api(`/api/items/${dentistId}/recurrence`, { method: 'POST', body: {
+    accept: true, count: 3, freq: 'WEEKLY\r\nATTENDEE:mailto:evil@example.com',
+  } });
+  check('iCalendar injection via repeat is refused', inject.status === 400, String(inject.status));
+
+  const wideOpen = await api('/api/shares', { method: 'POST', body: {} });
+  check('a share must name what it shares', wideOpen.status === 400, String(wideOpen.status));
+
+  const ghostRedo = await api('/api/batches/nope/redo', { method: 'POST' });
+  check('redo on a missing batch 404s', ghostRedo.status === 404, String(ghostRedo.status));
+
   const missing = await api('/api/batches/does-not-exist');
   check('unknown batch 404s', missing.status === 404);
 } catch (e) {
   failed++;
   failures.push(`harness: ${e.message}`);
   console.error('\nharness error:', e);
+  if (serverErr) console.error('--- server stderr ---\n' + serverErr.split('\n').filter(l=>!/Experimental|trace-warnings/.test(l)).join('\n'));
 } finally {
   server.kill();
   try { fs.rmSync(TMP_DATA, { recursive: true, force: true }); } catch { /* ignore */ }

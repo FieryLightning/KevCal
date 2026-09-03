@@ -11,7 +11,7 @@ import { extract, assessRisk } from './extract/index.js';
 import { aiAvailable } from './extract/anthropic.js';
 import { buildICS } from './lib/ics.js';
 import { diffItems, describeDiff } from './lib/diff.js';
-import { json, badRequest, notFound, readJSON, serveFile } from './lib/http.js';
+import { json, badRequest, notFound, readJSON, serveFile, fromBodyError } from './lib/http.js';
 import { today, addDays, formatHuman, formatTime, daysBetween } from './lib/dates.js';
 
 const ITEM_COLUMNS = [
@@ -97,7 +97,7 @@ function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
 
 export async function captureHandler(req, res) {
   let body;
-  try { body = await readJSON(req); } catch (e) { return badRequest(res, e.message); }
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
 
   const kind = body.kind === 'text' ? 'text' : (body.filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'image';
   const reference = body.reference || today();
@@ -129,9 +129,7 @@ export async function captureHandler(req, res) {
   }
 
   const batchId = id('b_');
-  const title = body.title
-    || (kind === 'text' ? firstWords(body.text) : body.filename || 'Capture')
-    || 'Capture';
+  const title = body.title || documentTitle(result, kind, body) || 'Capture';
 
   db.prepare(`
     INSERT INTO batches (id, title, source_kind, source_name, source_path, source_text,
@@ -169,6 +167,19 @@ export async function captureHandler(req, res) {
     aiAvailable: result.aiAvailable,
     diff,
   });
+}
+
+/**
+ * A batch title is how you recognise an import weeks later, so prefer the
+ * document's own headline over the camera's filename.
+ */
+function documentTitle(result, kind, body) {
+  if (kind === 'text') return firstWords(body.text);
+  const first = (result.lines || [])
+    .map((l) => (l.text || '').trim())
+    .find((t) => t.length >= 4 && t.length <= 60);
+  if (first) return first;
+  return body.filename || null;
 }
 
 function firstWords(text, n = 6) {
@@ -220,7 +231,9 @@ export async function commitBatch(req, res, batchId) {
   if (blocked.length) {
     return json(res, 409, {
       error: 'needs_review',
-      message: `${blocked.length} item${blocked.length === 1 ? '' : 's'} still need checking.`,
+      message: blocked.length === 1
+        ? 'One date needs an answer first — open it to fix or accept it.'
+        : `${blocked.length} dates need an answer first — open them to fix or accept.`,
       blocked: blocked.map((b) => ({ id: b.id, title: b.title, question: b.question })),
     });
   }
@@ -239,15 +252,23 @@ export function undoBatch(req, res, batchId) {
   const batch = getBatch(batchId);
   if (!batch) return notFound(res, 'batch not found');
   const at = nowISO();
-  const n = db.prepare("UPDATE items SET status='rejected', updated_at=? WHERE batch_id=?").run(at, batchId).changes;
+  // Mark only what this undo actually took away, so redo cannot resurrect
+  // something the user had deliberately rejected.
+  const n = db.prepare(
+    "UPDATE items SET status='rejected', undo_marked=1, updated_at=? WHERE batch_id=? AND status != 'rejected'",
+  ).run(at, batchId).changes;
   db.prepare("UPDATE batches SET status='undone', undone_at=? WHERE id=?").run(at, batchId);
   log('undo', { batch_id: batchId, detail: { count: n } });
   json(res, 200, { ok: true, removed: n });
 }
 
 export function redoBatch(req, res, batchId) {
+  const batch = getBatch(batchId);
+  if (!batch) return notFound(res, 'batch not found');
   const at = nowISO();
-  const n = db.prepare("UPDATE items SET status='accepted', updated_at=? WHERE batch_id=? AND status='rejected'").run(at, batchId).changes;
+  const n = db.prepare(
+    "UPDATE items SET status='accepted', undo_marked=0, updated_at=? WHERE batch_id=? AND undo_marked=1",
+  ).run(at, batchId).changes;
   db.prepare("UPDATE batches SET status='committed', undone_at=NULL WHERE id=?").run(batchId);
   log('redo', { batch_id: batchId, detail: { count: n } });
   json(res, 200, { ok: true, restored: n });
@@ -256,62 +277,133 @@ export function redoBatch(req, res, batchId) {
 export function deleteBatch(req, res, batchId) {
   const batch = getBatch(batchId);
   if (!batch) return notFound(res, 'batch not found');
+
+  // All-or-nothing, and the image goes only after the rows are safely gone —
+  // otherwise a failed delete leaves a batch listed with its source destroyed.
+  db.exec('BEGIN');
+  try {
+    db.prepare('UPDATE batches SET parent_id = NULL WHERE parent_id = ?').run(batchId);
+    db.prepare('DELETE FROM items WHERE batch_id = ?').run(batchId);
+    db.prepare('DELETE FROM shares WHERE batch_id = ?').run(batchId);
+    db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    return json(res, 500, { error: `could not delete: ${e.message}` });
+  }
+
   if (batch.source_path) {
     // Deleting an import deletes its source image; the privacy promise depends on it.
     try { fs.unlinkSync(path.join(ORIGINALS_DIR, batch.source_path)); } catch { /* already gone */ }
   }
-  db.prepare('DELETE FROM items WHERE batch_id = ?').run(batchId);
-  db.prepare('DELETE FROM shares WHERE batch_id = ?').run(batchId);
-  db.prepare('DELETE FROM batches WHERE id = ?').run(batchId);
   log('delete_batch', { batch_id: batchId });
   json(res, 200, { ok: true });
 }
 
 export async function applyDiff(req, res, batchId) {
+  const batch = getBatch(batchId);
+  if (!batch) return notFound(res, 'batch not found');
   let body;
-  try { body = await readJSON(req); } catch (e) { return badRequest(res, e.message); }
-  const { accept = [] } = body;   // [{op:'change'|'add'|'remove', targetId?, newItemId?}]
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
+  const accept = Array.isArray(body?.accept) ? body.accept : [];
   const at = nowISO();
-  let changed = 0, added = 0, removed = 0;
+  let changed = 0, added = 0, removed = 0, skipped = 0, blocked = 0;
+
+  const get = (id) => (typeof id === 'string' ? db.prepare('SELECT * FROM items WHERE id = ?').get(id) : null);
+  // The donor must be the freshly captured version; the target must be what it supersedes.
+  const isDonor = (row) => row && row.batch_id === batchId;
+  const isTarget = (row) => row && (!batch.parent_id || row.batch_id === batch.parent_id);
 
   for (const a of accept) {
-    if (a.op === 'change' && a.targetId && a.newItemId) {
-      const src = db.prepare('SELECT * FROM items WHERE id = ?').get(a.newItemId);
-      if (!src) continue;
+    if (a?.op === 'change') {
+      const src = get(a.newItemId);
+      const target = get(a.targetId);
+      if (!isDonor(src) || !isTarget(target)) { skipped++; continue; }
+      // Never silently revert a hand correction.
+      if (target.user_edited && !a.force) { skipped++; continue; }
       db.prepare(`UPDATE items SET title=?, start_date=?, start_time=?, end_date=?, end_time=?,
                   all_day=?, location=?, src_interpretation=?, updated_at=? WHERE id=?`)
         .run(src.title, src.start_date, src.start_time, src.end_date, src.end_time,
-             src.all_day, src.location, src.src_interpretation, at, a.targetId);
+             src.all_day, src.location, src.src_interpretation, at, target.id);
       changed++;
-    } else if (a.op === 'add' && a.newItemId) {
-      db.prepare("UPDATE items SET status='accepted', updated_at=? WHERE id=?").run(at, a.newItemId);
+    } else if (a?.op === 'add') {
+      const src = get(a.newItemId);
+      if (!isDonor(src)) { skipped++; continue; }
+      // Same gate as a plain commit: uncertainty cannot slip in through the diff.
+      if (src.needs_review && !src.reviewed) { blocked++; continue; }
+      db.prepare("UPDATE items SET status='accepted', updated_at=? WHERE id=?").run(at, src.id);
       added++;
-    } else if (a.op === 'remove' && a.targetId) {
-      db.prepare("UPDATE items SET status='superseded', updated_at=? WHERE id=?").run(at, a.targetId);
+    } else if (a?.op === 'remove') {
+      const target = get(a.targetId);
+      if (!isTarget(target)) { skipped++; continue; }
+      db.prepare("UPDATE items SET status='superseded', updated_at=? WHERE id=?").run(at, target.id);
       removed++;
+    } else {
+      skipped++;
     }
   }
   db.prepare("UPDATE batches SET status='committed', committed_at=? WHERE id=?").run(at, batchId);
-  log('apply_diff', { batch_id: batchId, detail: { changed, added, removed } });
-  json(res, 200, { ok: true, changed, added, removed });
+  log('apply_diff', { batch_id: batchId, detail: { changed, added, removed, skipped, blocked } });
+  json(res, 200, { ok: true, changed, added, removed, skipped, blocked });
 }
 
 // ---------------------------------------------------------------- items
+
+// ---------------------------------------------------------------- validation
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+function validDate(v) {
+  if (!ISO_DATE.test(v)) return false;
+  const d = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+}
+
+/**
+ * Field-level validation. `EDITABLE` gates which fields may be written; this
+ * gates what may be written into them. Without it a single bad value poisons
+ * every calendar export.
+ */
+const VALIDATORS = {
+  title: (v) => (typeof v === 'string' && v.trim().length && v.length <= 500 ? v.trim() : undefined),
+  kind: (v) => (v === 'event' || v === 'deadline' ? v : undefined),
+  start_date: (v) => (v === null || validDate(v) ? v : undefined),
+  end_date: (v) => (v === null || validDate(v) ? v : undefined),
+  start_time: (v) => (v === null || HHMM.test(v) ? v : undefined),
+  end_time: (v) => (v === null || HHMM.test(v) ? v : undefined),
+  all_day: (v) => (v === null ? 1 : (v ? 1 : 0)),
+  satisfied: (v) => (v ? 1 : 0),
+  location: (v) => (v === null || typeof v === 'string' ? (v ?? null) : undefined),
+  owner: (v) => (v === null || typeof v === 'string' ? (v ?? null) : undefined),
+  cost: (v) => (v === null || typeof v === 'string' ? (v ?? null) : undefined),
+  notes: (v) => (v === null || typeof v === 'string' ? (v ?? null) : undefined),
+  lead_days: (v) => (Array.isArray(v) && v.every((n) => Number.isInteger(n) && n >= 0 && n <= 3650)
+    ? JSON.stringify(v) : undefined),
+};
 
 export async function patchItem(req, res, itemId) {
   const item = db.prepare('SELECT * FROM items WHERE id = ?').get(itemId);
   if (!item) return notFound(res, 'item not found');
   let body;
-  try { body = await readJSON(req); } catch (e) { return badRequest(res, e.message); }
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return badRequest(res, 'body must be an object');
 
   const sets = [];
   const vals = [];
-  for (const [k, v] of Object.entries(body)) {
+  for (const [k, raw] of Object.entries(body)) {
     if (!EDITABLE.has(k)) continue;
+    const clean = VALIDATORS[k] ? VALIDATORS[k](raw) : undefined;
+    if (clean === undefined) return badRequest(res, `invalid value for ${k}`);
     sets.push(`${k} = ?`);
-    vals.push(k === 'lead_days' && Array.isArray(v) ? JSON.stringify(v) : (typeof v === 'boolean' ? (v ? 1 : 0) : v));
+    vals.push(clean);
   }
   if (!sets.length) return badRequest(res, 'no editable fields supplied');
+
+  // Guard the pair, not just each field: an end before a start is not a range.
+  const nextStart = 'start_date' in body ? VALIDATORS.start_date(body.start_date) : item.start_date;
+  const nextEnd = 'end_date' in body ? VALIDATORS.end_date(body.end_date) : item.end_date;
+  if (nextStart && nextEnd && nextEnd < nextStart) return badRequest(res, 'the end date is before the start date');
 
   if ('satisfied' in body) {
     sets.push('satisfied_at = ?');
@@ -328,9 +420,10 @@ export async function patchItem(req, res, itemId) {
 
 export async function bulkItems(req, res) {
   let body;
-  try { body = await readJSON(req); } catch (e) { return badRequest(res, e.message); }
-  const ids = Array.isArray(body.ids) ? body.ids : [];
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
+  const ids = (Array.isArray(body?.ids) ? body.ids : []).filter((v) => typeof v === 'string');
   if (!ids.length) return badRequest(res, 'no item ids supplied');
+  if (ids.length > 2000) return badRequest(res, 'too many items in one operation');
   const at = nowISO();
   const marks = ids.map(() => '?').join(',');
   let affected = 0;
@@ -359,7 +452,10 @@ export async function bulkItems(req, res) {
     case 'shift_days': {
       // "The whole thing moved by a week" — the most common real-world correction.
       const n = Number(body.days);
-      if (!Number.isFinite(n) || n === 0) return badRequest(res, 'days must be a non-zero number');
+      // Unbounded shifts produced NaN dates that then broke every calendar export.
+      if (!Number.isInteger(n) || n === 0 || Math.abs(n) > 3650) {
+        return badRequest(res, 'shift must be a whole number of days, up to 3650');
+      }
       const rows = db.prepare(`SELECT id, start_date, end_date FROM items WHERE id IN (${marks})`).all(...ids);
       const upd = db.prepare('UPDATE items SET start_date=?, end_date=?, user_edited=1, reviewed=1, updated_at=? WHERE id=?');
       for (const r of rows) {
@@ -385,41 +481,65 @@ export async function bulkItems(req, res) {
   json(res, 200, { ok: true, affected });
 }
 
+const FREQS = new Set(['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY']);
+const BYDAYS = new Set(['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU']);
+
 /**
  * Accepting a recurrence suggestion is the ONLY way an RRULE is ever created.
- * Nothing in the extractor may write one.
+ * Nothing in the extractor may write one. Every component is whitelisted: the
+ * rule is written verbatim into exported calendar files, so unvalidated input
+ * here would let arbitrary iCalendar properties be injected.
  */
 export async function acceptRecurrence(req, res, itemId) {
   const item = db.prepare('SELECT * FROM items WHERE id = ?').get(itemId);
   if (!item) return notFound(res, 'item not found');
   let body;
-  try { body = await readJSON(req); } catch (e) { return badRequest(res, e.message); }
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
 
-  if (body.accept === false) {
+  if (body?.accept === false) {
     db.prepare('UPDATE items SET recurrence_accepted=0, rrule=NULL, reviewed=1, updated_at=? WHERE id=?').run(nowISO(), itemId);
     return json(res, 200, { ok: true, accepted: false });
   }
 
   const sug = safeParse(item.recurrence_suggestion) || {};
-  const freq = body.freq || sug.freq || 'WEEKLY';
-  const interval = Number(body.interval || sug.interval || 1);
-  const until = body.until || null;
-  const count = body.count ? Number(body.count) : null;
+  const freq = String(body?.freq || sug.freq || 'WEEKLY').toUpperCase();
+  if (!FREQS.has(freq)) return badRequest(res, 'unsupported repeat frequency');
+
+  const interval = Number(body?.interval ?? sug.interval ?? 1);
+  if (!Number.isInteger(interval) || interval < 1 || interval > 52) {
+    return badRequest(res, 'repeat interval must be a whole number between 1 and 52');
+  }
+
+  const until = body?.until ?? null;
+  const count = body?.count != null ? Number(body.count) : null;
   if (!until && !count) {
     // Refusing an unbounded rule is deliberate: we never extrapolate past evidence.
     return badRequest(res, 'a repeat needs an end date or a number of occurrences');
   }
+  if (until && !(typeof until === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(until)
+                 && !Number.isNaN(new Date(`${until}T00:00:00Z`).getTime()))) {
+    return badRequest(res, 'the repeat end date must be a real date (YYYY-MM-DD)');
+  }
+  if (count != null && (!Number.isInteger(count) || count < 1 || count > 500)) {
+    return badRequest(res, 'the number of repeats must be between 1 and 500');
+  }
+
   const parts = [`FREQ=${freq}`];
   if (interval > 1) parts.push(`INTERVAL=${interval}`);
-  const byday = body.byday || sug.byday;
-  if (byday && freq === 'WEEKLY') parts.push(`BYDAY=${byday}`);
+  const byday = body?.byday ?? sug.byday;
+  if (byday && freq === 'WEEKLY') {
+    const day = String(byday).toUpperCase();
+    if (!BYDAYS.has(day)) return badRequest(res, 'unrecognised day for a weekly repeat');
+    parts.push(`BYDAY=${day}`);
+  }
   if (until) parts.push(`UNTIL=${until.replace(/-/g, '')}T235959Z`);
-  else if (count) parts.push(`COUNT=${count}`);
+  else parts.push(`COUNT=${count}`);
 
+  const rrule = parts.join(';');
   db.prepare('UPDATE items SET recurrence_accepted=1, rrule=?, reviewed=1, user_edited=1, updated_at=? WHERE id=?')
-    .run(parts.join(';'), nowISO(), itemId);
-  log('accept_recurrence', { item_id: itemId, detail: parts.join(';') });
-  json(res, 200, { ok: true, rrule: parts.join(';') });
+    .run(rrule, nowISO(), itemId);
+  log('accept_recurrence', { item_id: itemId, detail: rrule });
+  json(res, 200, { ok: true, rrule });
 }
 
 // ---------------------------------------------------------------- agenda
@@ -469,7 +589,7 @@ export function exportICS(req, res, url) {
 /** Hands the .ics to the Mac's default calendar app — the fastest route to a real calendar. */
 export async function openInCalendar(req, res) {
   let body;
-  try { body = await readJSON(req); } catch (e) { return badRequest(res, e.message); }
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
   const items = itemsForExport({ batchId: body.batchId, itemIds: body.itemIds }).filter((i) => i.start_date);
   if (!items.length) return badRequest(res, 'nothing to add');
   const batch = body.batchId ? getBatch(body.batchId) : null;
@@ -509,12 +629,17 @@ export function renderText(items, { title = 'Dates' } = {}) {
 
 export async function createShare(req, res) {
   let body;
-  try { body = await readJSON(req); } catch (e) { return badRequest(res, e.message); }
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
+  const itemIds = Array.isArray(body?.itemIds) ? body.itemIds.filter((v) => typeof v === 'string') : [];
+  if (!body?.batchId && !itemIds.length) {
+    return badRequest(res, 'choose an import or some dates to share');
+  }
+  if (body.batchId && !getBatch(body.batchId)) return notFound(res, 'batch not found');
   const token = crypto.randomBytes(12).toString('base64url');
   const shareId = id('sh_');
   db.prepare('INSERT INTO shares (id, batch_id, token, label, item_ids, created_at) VALUES (?,?,?,?,?,?)')
     .run(shareId, body.batchId ?? null, token, body.label ?? null,
-         Array.isArray(body.itemIds) && body.itemIds.length ? JSON.stringify(body.itemIds) : null, nowISO());
+         itemIds.length ? JSON.stringify(itemIds) : null, nowISO());
   log('share_create', { batch_id: body.batchId ?? null, detail: { token } });
   json(res, 200, { ok: true, id: shareId, token, path: `/s/${token}` });
 }
@@ -554,7 +679,8 @@ export function listShares(req, res) {
 }
 
 export function revokeShare(req, res, shareId) {
-  db.prepare('UPDATE shares SET revoked = 1 WHERE id = ?').run(shareId);
+  const n = db.prepare('UPDATE shares SET revoked = 1 WHERE id = ?').run(shareId).changes;
+  if (!n) return notFound(res, 'share not found');
   log('share_revoke', { detail: shareId });
   json(res, 200, { ok: true });
 }
@@ -572,7 +698,7 @@ export async function settingsHandler(req, res) {
     });
   }
   let body;
-  try { body = await readJSON(req); } catch (e) { return badRequest(res, e.message); }
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
   if ('ai_enabled' in body) setSetting('ai_enabled', Boolean(body.ai_enabled));
   if ('lead_days' in body) setSetting('lead_days', body.lead_days);
   json(res, 200, { ok: true });
@@ -583,7 +709,7 @@ export async function anchorsHandler(req, res) {
     return json(res, 200, { anchors: db.prepare('SELECT * FROM anchors ORDER BY created_at DESC').all() });
   }
   let body;
-  try { body = await readJSON(req); } catch (e) { return badRequest(res, e.message); }
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
   if (!body.week1_start) return badRequest(res, 'week1_start is required');
   const anchorId = id('a_');
   if (body.is_default) db.prepare('UPDATE anchors SET is_default = 0').run();

@@ -40,7 +40,7 @@ const DATE_PATTERNS = [
   },
   {
     name: 'dmy',
-    re: rx(`\\b(?:${DOW_RE}\\s*,?\\s+)?(\\d{1,2})${ORD}\\s+(?:of\\s+)?${MONTH_RE}\\.?(?:\\s*,?\\s+(\\d{4}|\\d{2})(?![\\d:]))?`),
+    re: rx(`\\b(?:${DOW_RE}\\s*,?\\s+)?(\\d{1,2})(?!\\d)${ORD}\\s+(?:of\\s+)?${MONTH_RE}\\.?(?:\\s*,?\\s+(\\d{4}|\\d{2})(?![\\d:]))?`),
     build: (m) => {
       const d = +m[1];
       const mo = MONTHS[m[2].toLowerCase().replace(/\./g, '')];
@@ -51,7 +51,9 @@ const DATE_PATTERNS = [
   },
   {
     name: 'mdy',
-    re: rx(`\\b(?:${DOW_RE}\\s*,?\\s+)?${MONTH_RE}\\.?\\s+(\\d{1,2})${ORD}(?:\\s*,?\\s+(\\d{4}|\\d{2})(?![\\d:]))?`),
+    // (?!\\d) stops the day group eating the first digits of a bare year:
+    // "December 2031" must NOT parse as "December 20".
+    re: rx(`\\b(?:${DOW_RE}\\s*,?\\s+)?${MONTH_RE}\\.?\\s+(\\d{1,2})(?!\\d)${ORD}(?:\\s*,?\\s+(\\d{4}|\\d{2})(?![\\d:]))?`),
     build: (m) => {
       const mo = MONTHS[m[1].toLowerCase().replace(/\./g, '')];
       const d = +m[2];

@@ -7,9 +7,9 @@ const CRLF = '\r\n';
 function esc(s) {
   return String(s ?? '')
     .replace(/\\/g, '\\\\')
-    .replace(/;/g, '\;')
+    .replace(/;/g, '\\;')
     .replace(/,/g, '\\,')
-    .replace(/\r?\n/g, '\\n');
+    .replace(/\r\n|\r|\n/g, '\\n');
 }
 
 /** RFC 5545 says fold at 75 octets; fold on bytes, not characters. */
@@ -63,8 +63,13 @@ function alarmsFor(item, leadDays) {
   }).flat();
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
 export function itemToVEvent(item, { leadDays = [], domain = 'kevcal.local' } = {}) {
-  if (!item.start_date) return null;
+  // A single corrupt row must never take the whole calendar export down with it.
+  if (!item.start_date || !ISO_DATE.test(item.start_date)) return null;
+  if (item.end_date && !ISO_DATE.test(item.end_date)) return null;
+  if (Number.isNaN(new Date(`${item.start_date}T00:00:00Z`).getTime())) return null;
   const lines = ['BEGIN:VEVENT'];
   lines.push(`UID:${item.id || item.fingerprint}@${domain}`);
   lines.push(`DTSTAMP:${stamp()}`);

@@ -6,7 +6,7 @@ import {
   findDates, findWeekRefs, findTimes, detectDeadline, detectRecurrence,
   extractContext, deriveTitle, looksLikeHeading,
 } from './grammar.js';
-import { addDays, mondayOf, nextDow, today, iso, MONTHS, isValidYMD } from '../lib/dates.js';
+import { addDays, mondayOf, nextDow, today, iso, isValidYMD, daysBetween } from '../lib/dates.js';
 import { groupRows } from './rows.js';
 
 const RANGE_BETWEEN = /^\s*(?:-|–|—|to|until|till|through|thru)\s*$/i;
@@ -112,8 +112,13 @@ export function buildItems(rawLines, opts = {}) {
     const ctx = extractContext(text);
     const dl = detectDeadline(text, heading);
 
-    const push = (partial, spans, extra = {}) => {
-      const derived = deriveTitle(text, [...spans, rec].filter(Boolean));
+    /**
+     * @param srcText  the span this item was derived from — a segment of the line
+     *                 when one line carries several dates.
+     * @param recSpan  the recurrence phrase to strip, when it falls in this segment.
+     */
+    const push = (partial, spans, extra = {}, srcText = text, recSpan = rec) => {
+      const derived = deriveTitle(srcText, [...spans, recSpan].filter(Boolean));
       // Fall back through: the line itself, its section heading, then the line
       // above it (posters and tables put the name on a separate line).
       const title = derived || heading || prevPlainText || '(untitled)';
@@ -131,17 +136,18 @@ export function buildItems(rawLines, opts = {}) {
         location: ctx.location, cost: ctx.cost, owner: null, notes: null,
         confidence: conf,
         needs_review: conf < REVIEW_THRESHOLD || !!extra.unresolvedRelative || !!extra.needsStartDate ? 1 : 0,
-        recurrence_suggestion: rec ? JSON.stringify(rec) : null,
+        recurrence_suggestion: recSpan ? JSON.stringify(recSpan) : null,
         recurrence_accepted: 0,
         rrule: null,
         satisfied: 0,
         src_page: line.page ?? 1,
         src_bbox: line.bbox ? JSON.stringify(line.bbox) : null,
-        src_raw: text,
+        src_raw: srcText.trim(),
         src_interpretation: null,
         src_line: lineNo,
         heading: heading || null,
         deadline_marker: dl.marker,
+        _hasYear: extra.hasYear !== false,
         ...partial,
       };
       item.fingerprint = fingerprint(item);
@@ -152,41 +158,50 @@ export function buildItems(rawLines, opts = {}) {
     };
 
     if (dates.length) {
-      // A range on one line: "Monday 16 February to Friday 20 February".
-      const joinedRange = dates.length === 2
-        && RANGE_BETWEEN.test(text.slice(dates[0].index + dates[0].length, dates[1].index));
+      // Several dates on one line. PDFs routinely deliver a whole paragraph as a
+      // single string, so split the text around each date; otherwise every item
+      // inherits the entire blob as its title. In these documents the label
+      // always precedes its date ("INSET Day (school closed): Monday 31 August"),
+      // so each segment runs from the end of the previous date to the end of this one.
+      const entries = mergeRangePairs(text, dates);
 
-      if (joinedRange) {
-        const t = times[0];
+      entries.forEach((e, i) => {
+        const prev = entries[i - 1];
+        const segStart = prev ? prev.index + prev.length : 0;
+        const segEnd = entries[i + 1] ? e.index + e.length : text.length;
+        const segText = text.slice(segStart, segEnd);
+
+        const localSpans = e.parts.map((p) => ({ ...p, index: p.index - segStart }));
+        let localTimes = times
+          .filter((t) => t.index >= segStart && t.index < segEnd)
+          .map((t) => ({ ...t, index: t.index - segStart }));
+        if (!localTimes.length && entries.length === 1 && times[0]) localTimes = [times[0]];
+
+        const localRec = rec && rec.index >= segStart && rec.index < segEnd
+          ? { ...rec, index: rec.index - segStart }
+          : null;
+
+        const t = localTimes[0];
+        const first = e.parts[0];
+        const interp = e.endDate
+          ? `${e.parts[0].raw} → ${e.parts[1].raw} (range)`
+          : first.type === 'week-commencing'
+            ? `${first.raw} → week beginning ${e.date}`
+            : `${first.raw} → ${e.date}`;
+
         push({
-          start_date: dates[0].date, end_date: dates[1].date,
-          start_time: t?.start ?? null, end_time: t?.end ?? null,
+          start_date: e.date,
+          end_date: e.endDate ?? null,
+          start_time: t?.start ?? null,
+          end_time: t?.end ?? null,
           all_day: t ? 0 : 1,
-          src_interpretation: `${dates[0].raw} → ${dates[1].raw} (range)`,
-        }, [...dates, ...times], {
-          specificity: Math.min(dates[0].specificity, dates[1].specificity),
-          hasYear: dates[0].hasYear, ambiguousOrder: dates[0].ambiguousOrder,
-        });
-      } else {
-        dates.forEach((d, i) => {
-          const t = times[i] || (dates.length === 1 ? times[0] : null);
-          const interp = d.type === 'week-commencing'
-            ? `${d.raw} → week beginning ${d.date}`
-            : `${d.raw} → ${d.date}`;
-          push({
-            start_date: d.date,
-            end_date: null,
-            start_time: t?.start ?? null,
-            end_time: t?.end ?? null,
-            all_day: t ? 0 : 1,
-            src_interpretation: interp + (t ? ` at ${t.raw}` : ''),
-          }, [d, ...(t ? [t] : [])], {
-            specificity: d.specificity, hasYear: d.hasYear,
-            ambiguousOrder: d.ambiguousOrder,
-            multipleUnjoined: dates.length > 1,
-          });
-        });
-      }
+          src_interpretation: interp + (t ? ` at ${t.raw}` : ''),
+        }, [...localSpans, ...localTimes], {
+          specificity: first.specificity, hasYear: first.hasYear,
+          ambiguousOrder: first.ambiguousOrder,
+          multipleUnjoined: entries.length > 1 && !e.endDate,
+        }, segText, localRec);
+      });
       return;
     }
 
@@ -266,6 +281,8 @@ export function buildItems(rawLines, opts = {}) {
     if (!dates.length && !weekRefs.length && text.length > 3 && text.length < 90) prevPlainText = text;
   });
 
+  resolveYearsFromContext(items);
+
   // Same title + same date twice in one document is a duplicate, not two events.
   const seen = new Map();
   const deduped = [];
@@ -282,6 +299,7 @@ export function buildItems(rawLines, opts = {}) {
     seen.set(key, it);
     deduped.push(it);
   }
+  deduped.forEach((i) => { delete i._hasYear; });
 
   return {
     items: deduped,
@@ -295,6 +313,75 @@ export function buildItems(rawLines, opts = {}) {
       withRecurrenceHint: deduped.filter((i) => i.recurrence_suggestion).length,
     },
   };
+}
+
+/**
+ * A date written without a year belongs to the document it sits in, not to
+ * today's calendar. "RSVP by 10 October" on a poster for an event on 15 October
+ * 2025 means 2025 — inferring 2026 from today's date puts the deadline five days
+ * AFTER the thing it is a deadline for. So snap yearless dates to the nearest
+ * date in the same document that stated its year outright.
+ */
+/**
+ * Collapse "16 February 2026 to 20 February 2026" into one dated entry, even
+ * when it sits among other dates on the same line.
+ */
+function mergeRangePairs(text, dates) {
+  const entries = [];
+  for (let i = 0; i < dates.length; i++) {
+    const d = dates[i];
+    const next = dates[i + 1];
+    if (next && RANGE_BETWEEN.test(text.slice(d.index + d.length, next.index))) {
+      // A range read backwards is a misread, not a fact. Order it.
+      const [from, to] = d.date <= next.date ? [d.date, next.date] : [next.date, d.date];
+      entries.push({
+        date: from,
+        endDate: to,
+        index: d.index,
+        length: (next.index + next.length) - d.index,
+        parts: [d, next],
+      });
+      i++;
+      continue;
+    }
+    entries.push({ date: d.date, endDate: null, index: d.index, length: d.length, parts: [d] });
+  }
+  return entries;
+}
+
+function resolveYearsFromContext(items) {
+  const anchored = items.filter((i) => i._hasYear && i.start_date);
+  if (!anchored.length) return;
+
+  for (const item of items) {
+    if (item._hasYear || !item.start_date) continue;
+
+    // Nearest anchored item by position in the document.
+    let nearest = null;
+    let bestDistance = Infinity;
+    for (const a of anchored) {
+      const d = Math.abs((a.src_line ?? 0) - (item.src_line ?? 0));
+      if (d < bestDistance) { bestDistance = d; nearest = a; }
+    }
+    if (!nearest || bestDistance > 12) continue;
+
+    const [, month, day] = item.start_date.split('-').map(Number);
+    const anchorYear = Number(nearest.start_date.slice(0, 4));
+    let best = item.start_date;
+    let bestGap = Infinity;
+    for (const y of [anchorYear - 1, anchorYear, anchorYear + 1]) {
+      if (!isValidYMD(y, month, day)) continue;
+      const candidate = iso(y, month, day);
+      const gap = Math.abs(daysBetween(nearest.start_date, candidate));
+      if (gap < bestGap) { bestGap = gap; best = candidate; }
+    }
+
+    if (best !== item.start_date) {
+      item.src_interpretation = `${item.src_interpretation || ''} — year taken as ${best.slice(0, 4)} from “${nearest.title}” elsewhere in the document`.trim();
+      item.start_date = best;
+      item.fingerprint = fingerprint(item);
+    }
+  }
 }
 
 export { REVIEW_THRESHOLD };

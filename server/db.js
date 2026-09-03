@@ -116,6 +116,13 @@ CREATE TABLE IF NOT EXISTS audit (
 );
 `);
 
+/** Additive migrations: safe to run on every start. */
+function addColumn(table, definition, name) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
+}
+addColumn('items', 'undo_marked INTEGER NOT NULL DEFAULT 0', 'undo_marked');
+
 export function nowISO() { return new Date().toISOString(); }
 
 export function id(prefix = '') {

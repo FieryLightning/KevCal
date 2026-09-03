@@ -7,11 +7,13 @@
   --surface-2: #f1efea;
   --ink: #1b1a17;
   --ink-2: #56534c;
-  --ink-3: #8b877e;
+  --ink-3: #6d695f;
   --line: #e3dfd7;
   --accent: #2f6fd0;
+  --on-accent: #ffffff;
+  --toast-accent: #9dc0ff;
   --accent-soft: #e8f0fc;
-  --due: #c2620d;
+  --due: #9a4e05;
   --due-soft: #fdf0e2;
   --good: #2e7d4f;
   --good-soft: #e6f4ec;
@@ -30,9 +32,11 @@
     --surface-2: #2a2831;
     --ink: #f0eef2;
     --ink-2: #b6b2bd;
-    --ink-3: #837f8c;
+    --ink-3: #9c97a8;
     --line: #343240;
     --accent: #7fa9f0;
+  --on-accent: #0d1220;
+  --toast-accent: #1b4fc4;
     --accent-soft: #1e2a3d;
     --due: #eba659;
     --due-soft: #3a2c19;
@@ -100,6 +104,7 @@ nav.tabs button {
 nav.tabs button .ico { font-size: 19px; line-height: 1; }
 nav.tabs button[aria-selected="true"] { color: var(--accent); background: var(--accent-soft); }
 nav.tabs .badge {
+  color: var(--on-accent);
   position: absolute; transform: translate(14px, -6px);
   background: var(--due); color: #fff; border-radius: 999px;
   font-size: 10px; padding: 1px 5px; font-weight: 700;
@@ -132,7 +137,7 @@ nav.tabs .badge {
 .btn:hover { border-color: var(--ink-3); }
 .btn:active { transform: scale(.97); }
 .btn[disabled] { opacity: .45; pointer-events: none; }
-.btn.primary { background: var(--accent); color: #fff; border-color: transparent; }
+.btn.primary { background: var(--accent); color: var(--on-accent); border-color: transparent; }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn.danger { color: var(--warn); }
 .btn.ghost { background: none; border-color: transparent; color: var(--ink-2); }
@@ -202,6 +207,8 @@ kbd {
 
 .item-head { display: flex; gap: 10px; align-items: flex-start; padding: 11px 12px; }
 .item-head .check {
+  padding: 0;
+  font-family: inherit;
   width: 20px; height: 20px; border-radius: 5px; border: 1.5px solid var(--line);
   flex: 0 0 auto; margin-top: 2px; display: grid; place-items: center;
   background: var(--surface); font-size: 12px; color: transparent;
@@ -281,8 +288,8 @@ details.collapsed-ok[open] summary::before { transform: rotate(90deg); }
 }
 .day-badge .d { font-size: 17px; font-weight: 680; }
 .day-badge .m { font-size: 10.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .04em; }
-.day-badge.today { background: var(--accent); color: #fff; }
-.day-badge.today .m { color: rgba(255,255,255,.85); }
+.day-badge.today { background: var(--accent); color: var(--on-accent); }
+.day-badge.today .m { color: var(--on-accent); opacity: .8; }
 
 /* ---------- misc ---------- */
 
@@ -305,7 +312,7 @@ details.collapsed-ok[open] summary::before { transform: rotate(90deg); }
   display: flex; align-items: center; gap: 12px; box-shadow: var(--shadow);
   animation: rise .2s ease-out; max-width: calc(100vw - 32px);
 }
-.toast button { background: none; border: 0; color: var(--accent); font-weight: 650; padding: 0; }
+.toast button { background: none; border: 0; color: var(--toast-accent); font-weight: 700; padding: 4px 2px; min-height: 32px; }
 
 .spinner {
   width: 17px; height: 17px; border: 2px solid var(--line);
@@ -336,4 +343,40 @@ pre.sharetext {
     border-top: 0; border-bottom: 1px solid var(--line); background: transparent; backdrop-filter: none;
   }
   nav.tabs button { flex-direction: row; font-size: 13.5px; gap: 7px; padding: 9px 14px; }
+}
+
+/* ---------- focus ---------- */
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.check:focus-visible { outline-offset: 1px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+/* ---------- overdue ---------- */
+
+.item.overdue { border-left: 3px solid var(--warn); }
+.overdue-flag {
+  background: var(--warn-soft); color: var(--warn);
+  font-weight: 700; font-size: 11.5px; padding: 2px 8px; border-radius: 999px;
+}
+
+/* ---------- fast path: one card, one decision ---------- */
+
+.confirm {
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 20px; text-align: center; margin-bottom: 12px;
+}
+.confirm .what { font-size: 19px; font-weight: 640; letter-spacing: -.015em; margin-bottom: 4px; }
+.confirm .whenline { color: var(--ink-2); font-size: 14.5px; }
+.confirm .more { color: var(--ink-3); font-size: 13px; margin-top: 8px; }
+.confirm .actions { margin-top: 16px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }

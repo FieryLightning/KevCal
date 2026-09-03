@@ -108,6 +108,8 @@ export function normaliseTime(hour, minute, meridiem) {
   const m = Number(minute ?? 0);
   if (meridiem) {
     const mer = meridiem.toLowerCase().replace(/\./g, '');
+    // A 12-hour clock cannot say '13pm'; refuse rather than guess.
+    if (h > 12 || h < 1) return null;
     if (mer.startsWith('p') && h < 12) h += 12;
     if (mer.startsWith('a') && h === 12) h = 0;
   }

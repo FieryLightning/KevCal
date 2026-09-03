@@ -34,6 +34,14 @@ export function badRequest(res, why) {
   json(res, 400, { error: why });
 }
 
+/** A body that blew the size cap deserves 413, not a confusing 400. */
+export function fromBodyError(res, e) {
+  if (/too large/i.test(e.message)) {
+    return json(res, 413, { error: 'that file is too big — 40 MB is the limit' });
+  }
+  return badRequest(res, e.message);
+}
+
 const MAX_BODY = 40 * 1024 * 1024; // generous: a multi-page PDF as base64
 
 export function readBody(req) {
@@ -78,8 +86,11 @@ export function serveFile(res, filePath, { download = null, cache = 'no-store' }
 
 /** Guards against path traversal when serving from a directory. */
 export function safeJoin(root, requested) {
-  const target = path.normalize(path.join(root, requested));
-  if (!target.startsWith(path.normalize(root))) return null;
+  const base = path.resolve(root);
+  const target = path.resolve(base, '.' + path.sep + requested);
+  // Compare against base + separator so a sibling directory named 'public-x'
+  // cannot satisfy a plain startsWith check.
+  if (target !== base && !target.startsWith(base + path.sep)) return null;
   return target;
 }
 

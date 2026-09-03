@@ -45,6 +45,8 @@ function toast(message, actionLabel, onAction, ms = 7000) {
     el.appendChild(b);
   }
   document.body.appendChild(el);
+  const live = $('#liveRegion');
+  if (live) live.textContent = message;
   toastTimer = setTimeout(() => el.remove(), ms);
 }
 
@@ -148,6 +150,7 @@ function renderResult(result) {
   state.batch = result.batch;
   state.items = result.items;
   state.sel = new Set();
+  state.result = result;
 
   const el = $('#captureResult');
   if (!result.items.length) {
@@ -159,14 +162,47 @@ function renderResult(result) {
     return;
   }
 
-  const needing = result.items.filter((i) => i.needs_review);
-  const fine = result.items.filter((i) => !i.needs_review);
-  const fastPath = result.risk === 'low';
+  // Low risk earns one card and one decision. Everything else gets the table.
+  if (result.risk === 'low') return renderConfirmCard(result);
+  renderFullReview(result);
+}
 
+/** The three-tap path: what it found, and a button. Detail is opt-in. */
+function renderConfirmCard(result) {
+  const items = result.items;
+  const one = items.length === 1 ? items[0] : null;
+  $('#captureResult').innerHTML = `
+    <div class="confirm">
+      ${one
+        ? `<div class="what">${esc(one.title)}</div>
+           <div class="whenline">${esc(whenText(one))}${one.location ? ` · ${esc(one.location)}` : ''}</div>`
+        : `<div class="what">${items.length} dates found</div>
+           <div class="whenline">${items.map((i) => esc(i.title)).join(' · ')}</div>`}
+      <div class="actions">
+        <button class="btn primary big" id="btnCommit">Keep ${one ? 'it' : 'them'}</button>
+        <button class="btn ghost" id="btnDiscard">No thanks</button>
+      </div>
+      <div class="more"><button class="btn tiny ghost" id="btnShowDetail">Check where these came from</button></div>
+    </div>`;
+  $('#btnCommit').onclick = commitCurrent;
+  $('#btnDiscard').onclick = discardCurrent;
+  $('#btnShowDetail').onclick = () => renderFullReview(result);
+}
+
+function renderFullReview(result) {
+  const needing = result.items.filter((i) => i.needs_review);
   const parts = [];
 
   if (result.diff) {
-    parts.push(`<div class="banner info"><strong>${esc(result.diff.description)}</strong> — this looks like an updated version, so nothing was duplicated.</div>`);
+    const s = result.diff.summary;
+    const bits = [];
+    if (s.changed) bits.push(`${s.changed} changed`);
+    if (s.added) bits.push(`${s.added} added`);
+    if (s.removed) bits.push(`${s.removed} removed`);
+    if (s.conflicts) bits.push(`${s.conflicts} you'd edited (left alone)`);
+    parts.push(`<div class="banner info">
+      <strong>This is a newer version.</strong> ${esc(bits.join(', ') || 'Nothing has changed')} — nothing was duplicated.
+    </div>`);
   }
 
   parts.push(sourceBlock(result));
@@ -177,36 +213,45 @@ function renderResult(result) {
       <span class="muted">${result.items.length === 1 ? 'thing found' : 'things found'}${
         needing.length ? ` · <strong style="color:var(--due)">${needing.length} need${needing.length === 1 ? 's' : ''} a look</strong>` : ''}</span>
     </div>
-    <p class="muted" style="margin:0">${fastPath
-      ? 'These all look clear. Have a glance and add them.'
-      : 'The uncertain ones are at the top. The rest are folded away.'}</p>
+    <p class="muted" style="margin:0">${needing.length
+      ? 'The uncertain ones are at the top. The rest are folded away.'
+      : 'Tap any row to see where it came from.'}</p>
   </div>`);
 
   parts.push('<div id="itemList"></div>');
   parts.push(`<div class="actions" style="margin-top:14px;justify-content:flex-start">
-    <button class="btn primary big" id="btnCommit">Add ${result.items.length} to my calendar</button>
+    <button class="btn primary big" id="btnCommit">Keep these ${result.items.length} dates</button>
     <button class="btn" id="btnDiscard">Discard</button>
   </div>`);
 
-  el.innerHTML = parts.join('');
+  $('#captureResult').innerHTML = parts.join('');
   renderItemList();
   countUp($('#foundCount'), result.items.length);
-
   $('#btnCommit').onclick = commitCurrent;
-  $('#btnDiscard').onclick = async () => {
-    await api(`/api/batches/${state.batch.id}`, { method: 'DELETE' });
-    el.innerHTML = '';
-    toast('Discarded.');
-  };
+  $('#btnDiscard').onclick = discardCurrent;
+}
+
+async function discardCurrent() {
+  await api(`/api/batches/${state.batch.id}`, { method: 'DELETE' });
+  $('#captureResult').innerHTML = '';
+  toast('Discarded.');
 }
 
 function sourceBlock(result) {
-  if (state.batch.source_kind === 'text') return '';
+  const kind = state.batch.source_kind;
+  // A PDF cannot render in an <img>, so don't draw boxes over a broken image.
+  if (kind !== 'image') {
+    return `<div class="card"><p class="muted" style="margin:0">
+      Read from <strong>${esc(state.batch.source_name || 'your text')}</strong>.
+      Each row below shows the exact wording it came from.</p></div>`;
+  }
   const boxes = result.items.filter((i) => i.bbox).map((i, n) => {
     const [x, y, w, h] = i.bbox;
+    // Pad thin lines so a 5px sliver is actually visible and tappable.
+    const padY = Math.max(0, (1.6 - 1) * h / 2);
     return `<rect data-id="${i.id}" class="${i.kind === 'deadline' ? 'due' : ''}"
-      x="${(x * 100).toFixed(2)}" y="${(y * 100).toFixed(2)}"
-      width="${(w * 100).toFixed(2)}" height="${(h * 100).toFixed(2)}"
+      x="${(x * 100).toFixed(2)}" y="${((y - padY) * 100).toFixed(2)}"
+      width="${(w * 100).toFixed(2)}" height="${(h * 1.6 * 100).toFixed(2)}"
       rx="0.6" style="animation-delay:${n * 55}ms"></rect>`;
   }).join('');
   return `<div class="source-wrap" id="sourceWrap">
@@ -246,14 +291,16 @@ function renderItemList() {
 function itemRow(i) {
   const sel = state.sel.has(i.id);
   const rec = i.recurrence;
+  const confLabel = i.confidence >= 0.8 ? 'confident' : i.confidence >= 0.6 ? 'fairly sure' : 'unsure';
   return `<div class="item ${i.needs_review ? 'review' : ''} ${sel ? 'selected' : ''} ${i.satisfied ? 'satisfied' : ''}" data-id="${i.id}">
     <div class="item-head">
-      <div class="check" data-act="select">✓</div>
+      <button type="button" class="check" data-act="select" aria-pressed="${sel}"
+              aria-label="Select ${esc(i.title)}">✓</button>
       <div class="item-main">
         <div class="title">${esc(i.title)}</div>
         <div class="when">${esc(whenText(i))}${i.location ? ` · ${esc(i.location)}` : ''}</div>
         <div class="meta">
-          <span class="conf ${confClass(i.confidence)}"></span>
+          <span class="conf ${confClass(i.confidence)}" role="img" aria-label="${confLabel}"></span>
           <span class="chip ${i.kind === 'deadline' ? 'due' : 'evt'}">${i.kind === 'deadline' ? 'Deadline' : 'Event'}</span>
           ${i.needs_review ? '<span class="chip low">Needs a look</span>' : ''}
           ${rec ? `<span class="chip rec">repeats? “${esc(rec.phrase || '')}”</span>` : ''}
@@ -296,10 +343,12 @@ function itemEditor(i) {
     <div class="provenance">
       <b>Where this came from</b><br>
       ${i.src_interpretation ? `${esc(i.src_interpretation)}<br>` : ''}
-      ${i.src_raw ? `<span class="raw">“${esc(i.src_raw)}”</span>` : '<span class="raw">typed in by hand</span>'}
+      ${i.src_raw ? `<span class="raw">“${esc(i.src_raw)}”</span>` : '<span class="raw">No source text — this one was typed in.</span>'}
+      ${i.src_page > 1 ? `<br><span class="raw">page ${i.src_page}</span>` : ''}
     </div>
     <div class="actions" style="justify-content:flex-start;margin-top:10px">
       <button class="btn tiny primary" data-act="save">Save</button>
+      ${i.needs_review ? '<button class="btn tiny" data-act="ok">Looks right</button>' : ''}
       <button class="btn tiny danger" data-act="delete">Delete</button>
     </div>
   </div>`;
@@ -346,7 +395,7 @@ function wireItems(root) {
   $$('[data-bulk]', root).forEach((b) => b.onclick = () => runBulk(b.dataset.bulk, b.dataset.days));
 }
 
-function wireEditor(row, item) {
+function wireEditor(row, item, onChange = renderItemList) {
   const body = row.querySelector('.item-body');
   body.querySelector('[data-act="save"]').onclick = async () => {
     const patch = {};
@@ -354,15 +403,21 @@ function wireEditor(row, item) {
     patch.all_day = patch.start_time ? 0 : 1;
     const { item: updated } = await api(`/api/items/${item.id}`, { method: 'PATCH', body: patch });
     Object.assign(item, updated);
-    renderItemList();
+    onChange();
     toast('Saved.');
   };
   body.querySelector('[data-act="delete"]').onclick = async () => {
     await api('/api/items/bulk', { method: 'POST', body: { ids: [item.id], op: 'delete' } });
     state.items = state.items.filter((x) => x.id !== item.id);
-    renderItemList();
+    onChange();
     toast('Deleted.');
   };
+  body.querySelector('[data-act="ok"]')?.addEventListener('click', async () => {
+    await api('/api/items/bulk', { method: 'POST', body: { ids: [item.id], op: 'review' } });
+    item.needs_review = 0;
+    onChange();
+    toast('Marked as right.');
+  });
   body.querySelector('[data-act="repeat"]')?.addEventListener('click', () => askRepeat(item));
 }
 
@@ -423,11 +478,13 @@ async function commitCurrent() {
         <strong>Added ${r.committed}.</strong> They're in your Dates list.
       </div>
       <div class="actions" style="justify-content:flex-start">
-        <button class="btn primary" id="btnOpenCal">Add to Apple Calendar</button>
+        <button class="btn primary" id="btnOpenCal">Open in the Mac's Calendar</button>
+        <button class="btn" id="btnDownloadIcs">Download .ics</button>
         <button class="btn" id="btnShareNow">Share these</button>
         <button class="btn ghost" id="btnUndoNow">Undo the whole import</button>
       </div>`;
     $('#btnOpenCal').onclick = () => openInCalendar(batchId);
+    $('#btnDownloadIcs').onclick = () => { window.location = `/api/export.ics?batch=${batchId}`; };
     $('#btnShareNow').onclick = () => openShare(batchId);
     $('#btnUndoNow').onclick = () => undoBatch(batchId, true);
     toast(`Added ${r.committed}.`, 'Undo', () => undoBatch(batchId, true));
@@ -444,7 +501,7 @@ async function commitCurrent() {
 async function openInCalendar(batchId) {
   try {
     const r = await api('/api/open-ics', { method: 'POST', body: { batchId } });
-    toast(r.ok ? `Opening ${r.count} in your calendar…` : 'Download the .ics instead.');
+    toast(r.ok ? `Opening ${r.count} in the Calendar app on the Mac running KevCal.` : 'Download the .ics instead.');
     if (!r.ok) window.location = `/api/export.ics?batch=${batchId}`;
   } catch (e) { toast(e.message); }
 }
@@ -493,7 +550,18 @@ async function loadAgenda() {
   }
   el.innerHTML = html;
 
-  $$('[data-satisfy]', el).forEach((b) => b.onclick = async () => {
+  $('.item', el).forEach((row) => {
+    const item = items.find((x) => x.id === row.dataset.id);
+    if (!item) return;
+    row.querySelector('[data-act="expand"]').onclick = () => {
+      const open = row.querySelector('.item-body');
+      if (open) { open.remove(); return; }
+      row.insertAdjacentHTML('beforeend', itemEditor(item));
+      wireEditor(row, item, loadAgenda);
+    };
+  });
+
+  $('[data-satisfy]', el).forEach((b) => b.onclick = async () => {
     const id = b.dataset.satisfy;
     const item = items.find((x) => x.id === id);
     await api('/api/items/bulk', { method: 'POST', body: { ids: [id], op: item.satisfied ? 'unsatisfy' : 'satisfy' } });
@@ -508,15 +576,16 @@ function agendaRow(i, today) {
     ? new Date(`${i.start_date}T00:00:00Z`).toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' })
     : '';
   const isToday = i.start_date === today;
-  const overdue = i.days_left != null && i.days_left < 0 && !i.satisfied;
+  const overdue = i.days_left != null && i.days_left < 0 && !i.satisfied && i.kind === 'deadline';
   const runway = i.kind === 'deadline' && i.runway != null && !i.satisfied
     ? `<div class="runway ${overdue ? 'past' : ''}"><i data-w="${Math.round(i.runway * 100)}%" style="width:0"></i></div>` : '';
   const left = i.days_left == null ? ''
     : i.days_left === 0 ? 'today'
     : i.days_left > 0 ? `in ${i.days_left} day${i.days_left === 1 ? '' : 's'}`
     : `${Math.abs(i.days_left)} day${Math.abs(i.days_left) === 1 ? '' : 's'} ago`;
+  const lead = (i.lead_days_resolved || []).filter((d) => d > 0);
 
-  return `<div class="item ${i.satisfied ? 'satisfied' : ''}">
+  return `<div class="item ${i.satisfied ? 'satisfied' : ''} ${overdue ? 'overdue' : ''}" data-id="${i.id}">
     <div class="item-head">
       <div class="day-badge ${isToday ? 'today' : ''}"><div class="d">${day}</div><div class="m">${mon}</div></div>
       <div class="item-main">
@@ -524,12 +593,15 @@ function agendaRow(i, today) {
         <div class="when">${i.human_time ? esc(i.human_time) + ' · ' : ''}${esc(left)}${i.location ? ' · ' + esc(i.location) : ''}</div>
         ${runway}
         <div class="meta">
+          ${overdue ? '<span class="overdue-flag">Overdue</span>' : ''}
           <span class="chip ${i.kind === 'deadline' ? 'due' : 'evt'}">${i.kind === 'deadline' ? 'Deadline' : 'Event'}</span>
           ${i.satisfied ? '<span class="chip ok">Sorted</span>' : ''}
+          ${lead.length && !i.satisfied ? `<span class="chip">nudges ${lead.join(', ')} days ahead</span>` : ''}
           ${i.batch_title ? `<span class="chip">${esc(i.batch_title)}</span>` : ''}
           ${i.kind === 'deadline'
             ? `<button class="btn tiny" data-satisfy="${i.id}">${i.satisfied ? 'Not done after all' : 'Mark sorted'}</button>`
             : ''}
+          <button class="btn tiny ghost" data-act="expand">Edit</button>
         </div>
       </div>
     </div>
@@ -604,6 +676,18 @@ $('#btnCopyText').onclick = async () => {
   }
 };
 $('#btnShareIcs').onclick = () => { window.location = `/api/export.ics?batch=${shareBatchId}`; };
+$('#btnSubscribe').onclick = async () => {
+  try {
+    const s = await api('/api/shares', { method: 'POST', body: { batchId: shareBatchId } });
+    const url = `${location.origin}/s/${s.token}.ics`;
+    try {
+      await navigator.clipboard.writeText(url);
+      toast('Subscribe link copied. It updates when you change these dates.');
+    } catch {
+      prompt('Subscribe link — it updates in place when you change these dates:', url);
+    }
+  } catch (e) { toast(e.message); }
+};
 $('#btnShareImage').onclick = () => renderShareImage($('#shareText').textContent);
 
 /** An image of the list is what people actually forward in a group chat. */

@@ -15,20 +15,22 @@
 <header class="top">
   <div class="brand">Kev<span>Cal</span></div>
   <div class="spacer"></div>
-  <div class="pill local" id="privacyPill" title="Where your images are processed">on-device</div>
+  <div class="pill local" id="privacyPill" title="Where your images are read">stays on this Mac</div>
 </header>
 
-<nav class="tabs" role="tablist">
-  <button role="tab" data-view="capture" aria-selected="true"><span class="ico">📸</span>Capture</button>
-  <button role="tab" data-view="dates" aria-selected="false"><span class="ico">🗓️</span>Dates</button>
-  <button role="tab" data-view="imports" aria-selected="false"><span class="ico">📥</span>Imports</button>
-  <button role="tab" data-view="settings" aria-selected="false"><span class="ico">⚙️</span>Settings</button>
+<div aria-live="polite" aria-atomic="true" class="sr-only" id="liveRegion"></div>
+
+<nav class="tabs" role="tablist" aria-label="Sections">
+  <button role="tab" data-view="capture" aria-selected="true" aria-controls="view-capture"><span class="ico">📸</span>Capture</button>
+  <button role="tab" data-view="dates" aria-selected="false" aria-controls="view-dates"><span class="ico">🗓️</span>Dates</button>
+  <button role="tab" data-view="imports" aria-selected="false" aria-controls="view-imports"><span class="ico">📥</span>Imports</button>
+  <button role="tab" data-view="settings" aria-selected="false" aria-controls="view-settings"><span class="ico">⚙️</span>Settings</button>
 </nav>
 
 <main>
 
   <!-- ============ CAPTURE ============ -->
-  <section class="view active" id="view-capture">
+  <section class="view active" id="view-capture" role="tabpanel" tabindex="-1">
     <div class="dropzone" id="dropzone">
       <div class="glyph">📸</div>
       <h2>Point it at anything with dates on it</h2>
@@ -55,24 +57,24 @@
   </section>
 
   <!-- ============ DATES ============ -->
-  <section class="view" id="view-dates">
+  <section class="view" id="view-dates" role="tabpanel" tabindex="-1">
     <div id="datesContent"><div class="empty"><span class="glyph">🗓️</span>Nothing yet.</div></div>
   </section>
 
   <!-- ============ IMPORTS ============ -->
-  <section class="view" id="view-imports">
+  <section class="view" id="view-imports" role="tabpanel" tabindex="-1">
     <div id="importsContent"><div class="empty"><span class="glyph">📥</span>No imports yet.</div></div>
   </section>
 
   <!-- ============ SETTINGS ============ -->
-  <section class="view" id="view-settings">
+  <section class="view" id="view-settings" role="tabpanel" tabindex="-1">
     <div class="card">
       <h3>Where your stuff lives</h3>
       <p class="muted" id="privacyText">Loading…</p>
     </div>
     <div class="card">
       <h3>Reminders</h3>
-      <p class="muted">A deadline is a wall with a runway in front of it. These are how far ahead you get nudged — they're written into the calendar entry itself, so they fire even when this app isn't running.</p>
+      <p class="muted">How far ahead you get nudged, in days. These are written into the calendar entry itself, so the reminders fire whether or not KevCal is running.</p>
       <div class="field-row">
         <div class="field">
           <label>Deadlines — days before</label>
@@ -118,6 +120,7 @@
     <button class="btn primary" id="btnCopyText">Copy as text</button>
     <button class="btn" id="btnShareIcs">Download .ics</button>
     <button class="btn" id="btnShareImage">Save as image</button>
+    <button class="btn" id="btnSubscribe">Copy subscribe link</button>
     <button class="btn ghost" id="btnCloseShare">Close</button>
   </div>
 </div></dialog>
