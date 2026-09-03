@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f5f2">
+<title>KevCal</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="KevCal">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand">Kev<span>Cal</span></div>
+  <div class="spacer"></div>
+  <div class="pill local" id="privacyPill" title="Where your images are processed">on-device</div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button role="tab" data-view="capture" aria-selected="true"><span class="ico">📸</span>Capture</button>
+  <button role="tab" data-view="dates" aria-selected="false"><span class="ico">🗓️</span>Dates</button>
+  <button role="tab" data-view="imports" aria-selected="false"><span class="ico">📥</span>Imports</button>
+  <button role="tab" data-view="settings" aria-selected="false"><span class="ico">⚙️</span>Settings</button>
+</nav>
+
+<main>
+
+  <!-- ============ CAPTURE ============ -->
+  <section class="view active" id="view-capture">
+    <div class="dropzone" id="dropzone">
+      <div class="glyph">📸</div>
+      <h2>Point it at anything with dates on it</h2>
+      <p>A school letter, a poster, a timetable, a service reminder, an email.</p>
+      <div class="actions">
+        <button class="btn primary big" id="btnCamera">Take a photo</button>
+        <button class="btn big" id="btnFile">Choose a file</button>
+      </div>
+      <p class="hint">or drop a file here · press <kbd>⌘V</kbd> to paste a screenshot</p>
+    </div>
+
+    <input type="file" id="fileCamera" accept="image/*" capture="environment" hidden>
+    <input type="file" id="filePicker" accept="image/*,application/pdf" hidden>
+
+    <details class="collapsed-ok" style="margin-top:14px">
+      <summary>Paste text instead</summary>
+      <textarea class="paste" id="pasteText" placeholder="Paste an email, a message, or any text with dates in it…"></textarea>
+      <div class="actions" style="justify-content:flex-start">
+        <button class="btn" id="btnPasteGo">Find the dates</button>
+      </div>
+    </details>
+
+    <div id="captureResult"></div>
+  </section>
+
+  <!-- ============ DATES ============ -->
+  <section class="view" id="view-dates">
+    <div id="datesContent"><div class="empty"><span class="glyph">🗓️</span>Nothing yet.</div></div>
+  </section>
+
+  <!-- ============ IMPORTS ============ -->
+  <section class="view" id="view-imports">
+    <div id="importsContent"><div class="empty"><span class="glyph">📥</span>No imports yet.</div></div>
+  </section>
+
+  <!-- ============ SETTINGS ============ -->
+  <section class="view" id="view-settings">
+    <div class="card">
+      <h3>Where your stuff lives</h3>
+      <p class="muted" id="privacyText">Loading…</p>
+    </div>
+    <div class="card">
+      <h3>Reminders</h3>
+      <p class="muted">A deadline is a wall with a runway in front of it. These are how far ahead you get nudged — they're written into the calendar entry itself, so they fire even when this app isn't running.</p>
+      <div class="field-row">
+        <div class="field">
+          <label>Deadlines — days before</label>
+          <input id="leadDeadline" placeholder="30, 14, 7, 2, 0">
+        </div>
+        <div class="field">
+          <label>Events — days before</label>
+          <input id="leadEvent" placeholder="1, 0">
+        </div>
+      </div>
+      <button class="btn" id="btnSaveLeads">Save</button>
+    </div>
+    <div class="card">
+      <h3>Term dates <span class="chip">optional</span></h3>
+      <p class="muted">Documents that say “Wk 7 (Fri)” or “w/c 18 Nov” need to know when week 1 starts. Set it once and those resolve automatically.</p>
+      <div class="field-row">
+        <div class="field"><label>Name</label><input id="anchorName" placeholder="Autumn term"></div>
+        <div class="field"><label>Monday of week 1</label><input id="anchorStart" type="date"></div>
+      </div>
+      <div class="field">
+        <label>Non-teaching weeks (Mondays, comma separated) — these don't count towards week numbers</label>
+        <input id="anchorSkips" placeholder="2025-11-03">
+      </div>
+      <div class="actions" style="justify-content:flex-start;margin-top:10px">
+        <button class="btn" id="btnSaveAnchor">Save term</button>
+      </div>
+      <div id="anchorList" class="muted" style="margin-top:10px"></div>
+    </div>
+    <div class="card">
+      <h3>AI reading <span class="chip" id="aiChip">off</span></h3>
+      <p class="muted" id="aiText">Loading…</p>
+      <button class="btn" id="btnToggleAI" hidden>Turn on</button>
+    </div>
+  </section>
+
+</main>
+
+<dialog id="shareDialog"><div class="dlg-body">
+  <h3>Share these dates</h3>
+  <p class="muted">Whoever you send this to doesn't need the app, an account, or a link they have to trust.</p>
+  <pre class="sharetext" id="shareText">…</pre>
+  <div class="actions" style="justify-content:flex-start">
+    <button class="btn primary" id="btnCopyText">Copy as text</button>
+    <button class="btn" id="btnShareIcs">Download .ics</button>
+    <button class="btn" id="btnShareImage">Save as image</button>
+    <button class="btn ghost" id="btnCloseShare">Close</button>
+  </div>
+</div></dialog>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

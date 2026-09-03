@@ -1,0 +1,15 @@
+{
+  "name": "kevcal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Turns a photo, screenshot or PDF of anything with dates on it into calendar events.",
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "start": "node server/index.js",
+    "build:tools": "swiftc -O -o bin/kevcal-ocr tools/ocr.swift && swiftc -O -o bin/kevcal-samples tools/make-samples.swift",
+    "samples": "./bin/kevcal-samples samples",
+    "test": "node test/run.js"
+  },
+  "dependencies": {}
+}
