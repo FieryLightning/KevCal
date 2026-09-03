@@ -141,7 +141,8 @@ export async function extract(opts) {
     if (ocr.ok) {
       lines = ocr.pages.flatMap((p) => p.lines.map((l) => ({ ...l, page: p.page })));
       page = { width: ocr.pages[0]?.width ?? null, height: ocr.pages[0]?.height ?? null };
-      engineParts.push('vision');
+      // Report what actually read it: 'pdf-text' means the PDF's own text layer.
+      engineParts.push(ocr.engine || 'vision');
     } else {
       ocrError = ocr.error || 'ocr_failed';
     }
