@@ -106,6 +106,20 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT
 );
 
+CREATE TABLE IF NOT EXISTS usage (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  at          TEXT NOT NULL,
+  month       TEXT NOT NULL,          -- YYYY-MM, local time
+  reader      TEXT NOT NULL,
+  model       TEXT,
+  in_tokens   INTEGER,
+  out_tokens  INTEGER,
+  estimated   INTEGER NOT NULL DEFAULT 0,  -- 1 when the provider reported no counts
+  cost        REAL NOT NULL DEFAULT 0,     -- estimated USD, never an invoice
+  batch_id    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_usage_month ON usage(month);
+
 CREATE TABLE IF NOT EXISTS audit (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
   at       TEXT NOT NULL,

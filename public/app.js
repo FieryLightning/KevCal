@@ -400,6 +400,7 @@ async function runCapture(payload, previewURL) {
   closeOverlay(scanner);
   haptic(18);
   showReview(res);
+  refreshCost();
 }
 
 function stopScan() { clearInterval(state.scanTimer); state.scanTimer = null; }
@@ -782,6 +783,8 @@ async function loadSettings() {
         : 'Fine on your own wifi. Set KEVCAL_TOKEN before you put this on a public address.'}</span>
     </div></div>`;
 
+  renderBudget(s);
+  renderPrices(s);
   $('#tzInput').value = s.timezone || timezone();
   $('#leadDeadline').value = (s.lead_days?.deadline || []).join(', ');
   $('#leadEvent').value = (s.lead_days?.event || []).join(', ');
@@ -804,6 +807,111 @@ async function loadSettings() {
     ? `Saved: ${anchors.map((a) => `${esc(a.name)} (week 1 from ${a.week1_start})`).join(', ')}`
     : '';
 }
+
+/**
+ * The running-cost line under every screen. It shows the per-page estimate and
+ * the month's total together, because a per-page figure on its own invites you
+ * to forget how many pages there were.
+ */
+function renderCostbar() {
+  const h = state.health || {};
+  const c = h.cost || {};
+  const bar = $('#costbar');
+  if (!h.reader_available) {
+    bar.className = 'costbar free';
+    bar.innerHTML = '<b>Read on this Mac.</b> <span>Nothing is uploaded, and nothing is charged.</span>';
+    bar.hidden = false;
+    return;
+  }
+  const name = READER_SHORT[h.reader] || h.reader;
+  const model = h.reader_model ? ' \u00b7 ' + esc(h.reader_model) : '';
+  const bits = ['<b>' + esc(name) + model + '</b>'];
+  if (c.paused) {
+    bar.className = 'costbar over';
+    bits.push('<span>' + money(c.spent) + ' of ' + money(c.limit)
+      + ' this month \u2014 <b>paused</b>, reading on this Mac</span>');
+  } else {
+    bar.className = 'costbar';
+    bits.push('<span class="sep">\u00b7</span><span>about ' + money(c.per_page) + ' a page</span>');
+    bits.push('<span class="sep">\u00b7</span><span>' + money(c.spent)
+      + (c.limit != null ? ' of ' + money(c.limit) : '') + ' this month</span>');
+  }
+  bar.innerHTML = bits.join(' ');
+  bar.hidden = false;
+}
+
+$('#costbar').addEventListener('click', () => go('settings'));
+
+/** Keep the line honest immediately after an import that spent something. */
+async function refreshCost() {
+  state.health = await api('/api/health');
+  renderCostbar();
+}
+
+const money = (n) => {
+  const v = Number(n) || 0;
+  if (v === 0) return '$0.00';
+  return v < 0.01 ? '<$0.01' : '$' + v.toFixed(2);
+};
+
+function renderPrices(s) {
+  const rows = s.prices || [];
+  const active = (state.health || {}).reader_model;
+  const cell = (n) => '$' + Number(n).toFixed(2);
+  const html = rows.map((p) => {
+    const isNow = p.model === active;
+    return '<div class="r' + (isNow ? ' now' : '') + '">'
+      + '<span class="m">' + esc(p.provider) + ' \u00b7 ' + esc(p.model)
+      + (isNow ? ' \u2014 in use' : '') + '</span>'
+      + '<span class="p">' + money(p.per_page) + '/page</span>'
+      + '<span class="p">' + cell(p.in) + '/' + cell(p.out) + ' per Mtok</span>'
+      + '</div>';
+  }).join('');
+  $('#priceTable').innerHTML = '<div class="pricetable">' + html + '</div>'
+    + '<p class="muted small" style="margin-top:8px">Rates as published on ' + esc(s.prices_checked || '')
+    + '. A page is taken as about 2,500 tokens in and 700 out.</p>';
+}
+
+function renderBudget(s) {
+  const b = s.budget || {};
+  const el = $('#budgetStatus');
+  const monthName = new Date(`${b.month || '1970-01'}-01T00:00:00`).toLocaleString(undefined, { month: 'long' });
+  const guessed = (s.budget_history || []).length ? '' : '';
+
+  if (b.limit == null) {
+    el.innerHTML = `<div class="banner">${money(b.spent)} estimated in ${esc(monthName)} across ${b.calls || 0} read${b.calls === 1 ? '' : 's'}.
+      <b>No cap set</b> — KevCal will keep reading however much you import.${guessed}</div>`;
+  } else {
+    const pct = Math.min(100, Math.round(((b.spent || 0) / b.limit) * 100));
+    el.innerHTML = `
+      <div class="item-meta" style="margin-bottom:6px">
+        <span><b>${money(b.spent)}</b> of ${money(b.limit)} in ${esc(monthName)}</span>
+        <span>${b.calls || 0} read${b.calls === 1 ? '' : 's'}</span>
+      </div>
+      <div class="runway" style="margin-top:0"><i style="width:${pct}%"></i></div>
+      ${b.paused
+        ? '<div class="banner stop" style="margin-top:10px"><b>Reading is paused.</b> KevCal is falling back to reading on this Mac until next month, or until you raise the cap.</div>'
+        : `<p class="muted small" style="margin-top:8px">About ${money(b.next_call_estimate)} per document. Estimated from published prices — treat it as a guard rail, not a bill.</p>`}`;
+  }
+
+  $('#budgetInput').value = b.limit == null ? '' : String(b.limit);
+  if (s.budget_locked) {
+    $('#budgetInput').disabled = true;
+    $('#btnSaveBudget').disabled = true;
+    $('#btnSaveBudget').textContent = 'Set in .env';
+  }
+}
+
+$('#btnSaveBudget').addEventListener('click', async () => {
+  const raw = $('#budgetInput').value.trim().replace(/^\$/, '');
+  const res = await api('/api/settings', {
+    method: 'POST',
+    body: { monthly_budget: raw === '' ? null : Number(raw) },
+  });
+  if (res.error) return toast(res.error);
+  toast(raw === '' ? 'Cap removed' : 'Capped at ' + money(Number(raw)) + ' a month');
+  loadSettings();
+});
 
 $('#btnTzDetect').addEventListener('click', () => { $('#tzInput').value = timezone(); });
 
@@ -854,6 +962,8 @@ async function boot() {
     chip.textContent = 'on-device only';
     chip.classList.add('warn');
   }
+
+  renderCostbar();
 
   // Arriving from the share-sheet Shortcut: go straight to what it found.
   const params = new URLSearchParams(location.search);

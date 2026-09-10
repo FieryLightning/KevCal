@@ -17,6 +17,7 @@ import { buildItems, fingerprint } from './build.js';
 import { readDocument, readerAvailable, readerName, readerModel } from './reader.js';
 import { verifyItems } from './verify.js';
 import { ROOT } from '../db.js';
+import * as budget from '../lib/budget.js';
 import { today, daysBetween, formatHuman, addDays } from '../lib/dates.js';
 
 const OCR_BIN = path.join(ROOT, 'bin', 'kevcal-ocr');
@@ -245,7 +246,11 @@ export async function extract(opts) {
     try { base64 = fs.readFileSync(opts.filePath).toString('base64'); } catch { /* handled below */ }
   }
 
-  const useReader = readerAvailable() && (opts.kind === 'text' ? Boolean(opts.text) : Boolean(base64));
+  // Priced before the call, not after: refusing once the money is spent is not
+  // a cap. Over budget, KevCal reads on-device instead of failing outright.
+  const money = budget.status(readerModel());
+  const useReader = readerAvailable() && !money.paused
+    && (opts.kind === 'text' ? Boolean(opts.text) : Boolean(base64));
   const readerPromise = useReader
     ? readDocument({ base64, filename: opts.filename, isPdf: opts.kind === 'pdf', text: opts.kind === 'text' ? opts.text : null })
     : Promise.resolve(null);
@@ -270,6 +275,7 @@ export async function extract(opts) {
   let anchorUsed = null;
 
   if (ai?.ok) {
+    budget.record({ reader: readerName(), model: ai.model, usage: ai.usage });
     doc = ai.doc || {};
     const ctx = {
       now,
@@ -284,7 +290,8 @@ export async function extract(opts) {
     if (lines.length) engineParts.push(ocr?.engine || 'vision');
     engineParts.push('checked');
   } else {
-    if (ai && !ai.ok) readerError = ai.detail ? `${ai.error}: ${ai.detail}` : ai.error;
+    if (money.paused && readerAvailable()) readerError = budget.pausedMessage(money);
+    else if (ai && !ai.ok) readerError = ai.detail ? `${ai.error}: ${ai.detail}` : ai.error;
     if (lines.length) {
       const built = buildItems(lines, { reference, anchor: opts.anchor });
       items = annotateBuiltItems(built.items, { now });
@@ -315,6 +322,7 @@ export async function extract(opts) {
     readerError,
     readerAvailable: readerAvailable(),
     usedReader: Boolean(ai?.ok),
+    budget: budget.status(),
   };
 }
 

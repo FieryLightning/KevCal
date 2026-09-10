@@ -6,6 +6,7 @@
 // and the exact bytes each reader would send are inspected here.
 
 import { SCHEMA, toStrict, redactSecrets } from '../server/extract/contract.js';
+import { estimateCost, priceOf, tokensFrom, TYPICAL_CALL } from '../server/lib/pricing.js';
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -174,6 +175,27 @@ group('Gemini reader');
   const thoughtful = await gemini.read(IMAGE);
   check('reasoning blocks are skipped when reading the answer',
     thoughtful.ok && thoughtful.items.length === 1, thoughtful.error || '');
+}
+
+group('pricing a page');
+{
+  check('a known model prices from its published rate',
+    Math.abs(estimateCost('gemini-2.5-flash', 1e6, 0) - 0.30) < 1e-9,
+    String(estimateCost('gemini-2.5-flash', 1e6, 0)));
+  check('input and output are priced separately',
+    Math.abs(estimateCost('gemini-2.5-flash', 1e6, 1e6) - 2.80) < 1e-9);
+  check('a dated variant prices as its family',
+    priceOf('gemini-3.8-flash-002').in === priceOf('gemini-3.8-flash').in);
+  check('an unknown model is priced ABOVE every known one, never below',
+    Object.keys({ a: 1 }) && priceOf('gemini-99-turbo').in > priceOf('gpt-6-astra').in,
+    `${priceOf('gemini-99-turbo').in} vs ${priceOf('gpt-6-astra').in}`);
+  check('zero tokens cost nothing', estimateCost('gemini-2.5-flash', 0, 0) === 0);
+
+  check('OpenAI token counts are read', tokensFrom({ input_tokens: 10, output_tokens: 2 }).in === 10);
+  check('Gemini token counts are read', tokensFrom({ prompt_token_count: 7, candidates_token_count: 3 }).out === 3);
+  check('no usage at all reads as null, so it can be charged as typical',
+    tokensFrom(null) === null && tokensFrom({}) === null);
+  check('a typical call is a sane size', TYPICAL_CALL.in > 500 && TYPICAL_CALL.in < 20000);
 }
 
 // ─────────────────────────────────────────────── the selector

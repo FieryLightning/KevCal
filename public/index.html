@@ -60,6 +60,22 @@
       </div>
 
       <div class="card">
+        <h3>What a page costs</h3>
+        <p class="muted">Estimated from each provider's published rates — a guard rail, not a bill. KevCal never looks these up while running.</p>
+        <div id="priceTable"></div>
+      </div>
+
+      <div class="card">
+        <h3>Monthly spend cap</h3>
+        <p class="muted">KevCal stops calling the reader once this month's estimated spend reaches your limit, and reads on this Mac instead. Set a cap at the provider as well — theirs is authoritative but lags about ten minutes; this one is instant but only sees what KevCal spends.</p>
+        <div id="budgetStatus"></div>
+        <div class="row" id="budgetControls">
+          <label class="field"><span>Limit, US$ per month</span><input id="budgetInput" inputmode="decimal" placeholder="no cap"></label>
+          <button class="btn" id="btnSaveBudget" type="button">Save</button>
+        </div>
+      </div>
+
+      <div class="card">
         <h3>Your timezone</h3>
         <p class="muted">Every time KevCal exports is anchored to this, so a shared calendar doesn't shift hours for whoever opens it.</p>
         <div class="row">
@@ -102,6 +118,8 @@
 
     </div>
   </section>
+
+  <footer class="costbar" id="costbar" hidden></footer>
 
 </main>
 

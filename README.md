@@ -198,6 +198,45 @@ than a privacy one:
 
 Rotate the key if you ever paste a terminal transcript somewhere public.
 
+## Keeping the bill at zero-ish
+
+A Cloud Billing **budget** does not cap anything. Google's own caution:
+
+> "Setting an *alerts-only* budget *doesn't* automatically cap Google Cloud or
+> Google Maps Platform usage or spending."
+
+That is the trap. Three things that do work, weakest to strongest:
+
+**1. A real spend cap at Google.** AI Studio → **Spend** → *Monthly spend cap* →
+Edit spend cap. This one does block calls. It is not exact — Google says you are
+"subject to overages for around a 10 minute latency period" while billing data
+catches up — but at one call per document that window is worth pennies.
+
+**2. A hard quota, which rejects rather than warns.** Cloud console →
+**IAM & Admin → Quotas & System Limits** → filter for the Generative Language
+API → tick a quota → **Edit** → enter a *lower* number. Decreases are
+self-service and need no approval: *"To restrict usage of a particular resource,
+create a quota override by changing the quota value to a value less than the
+default quota value."* Exceeding it returns `429 RESOURCE_EXHAUSTED` — a hard
+stop with no billing lag. Setting requests-per-day to something like 50 caps
+the worst case regardless of what any spend figure says.
+
+**3. KevCal's own cap**, which has no lag at all:
+
+```
+KEVCAL_MONTHLY_BUDGET=5
+```
+
+It prices every call from a static table of both providers' published rates —
+never fetched at runtime, because a spend guard that depends on the network
+fails open the day the network hiccups — and refuses the *next* call before
+making it, since stopping after the money is gone is not a cap. Over budget it
+falls back to reading on-device, so importing still works. Settings shows the
+month to date and the full price table; every screen carries a one-line total.
+
+Its limit: it only sees what KevCal spends. If the key leaks, only (1) and (2)
+protect you. Use all three.
+
 ## Where your things go
 
 Everything lives in `./data` on your own machine: a SQLite file and the original

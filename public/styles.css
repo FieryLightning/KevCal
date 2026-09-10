@@ -528,3 +528,33 @@ input[type=date], input[type=time] { min-height: 44px; }
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
   .scan-beam { display: none; }
 }
+
+/* Running cost, shown under every screen. Quiet by default — it is a fact you
+   should be able to check, not a number that should nag. */
+.costbar {
+  margin: 4px 2px 26px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center;
+  cursor: pointer;
+}
+.costbar[hidden] { display: none; }
+.costbar b { color: var(--ink-2); font-weight: 650; }
+.costbar .sep { opacity: .4; }
+.costbar.over { background: var(--stop-bg); border-color: var(--stop-line); color: var(--stop); }
+.costbar.over b { color: var(--stop); }
+.costbar.free { background: var(--ok-bg); border-color: transparent; color: var(--ok); }
+.costbar.free b { color: var(--ok); }
+
+.pricetable { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.pricetable .r { display: flex; gap: 8px; align-items: baseline; padding: 5px 0; border-bottom: 1px solid var(--line); }
+.pricetable .r:last-child { border-bottom: 0; }
+.pricetable .r.now { font-weight: 700; color: var(--ink); }
+.pricetable .m { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.pricetable .p { color: var(--muted); font-variant-numeric: tabular-nums; }
+.pricetable .r.now .p { color: var(--brand); }

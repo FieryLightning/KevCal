@@ -22,6 +22,8 @@ loadEnv(path.join(REPO, '.env'));
 const { ROOT, DATA_DIR, getSetting } = await import('./db.js');
 const { json, notFound, serveFile, safeJoin, send } = await import('./lib/http.js');
 const { ocrAvailable, readerAvailable, readerName, readerModel } = await import('./extract/index.js');
+const budget = await import('./lib/budget.js');
+const { estimateCost, TYPICAL_CALL } = await import('./lib/pricing.js');
 const api = await import('./api.js');
 
 const PORT = Number(process.env.KEVCAL_PORT || process.env.PORT || 4321);
@@ -64,6 +66,11 @@ const routes = [
     ocr: ocrAvailable(),
     locked: Boolean(TOKEN),
     data_dir: DATA_DIR,
+    // Enough for the running-cost line the app shows on every screen.
+    cost: {
+      per_page: readerAvailable() ? estimateCost(readerModel(), TYPICAL_CALL.in, TYPICAL_CALL.out) : 0,
+      ...budget.status(readerModel()),
+    },
   })],
 ];
 

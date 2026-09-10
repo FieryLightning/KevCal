@@ -12,6 +12,8 @@ import { buildICS } from './lib/ics.js';
 import { diffItems, describeDiff } from './lib/diff.js';
 import { json, badRequest, notFound, readJSON, serveFile, fromBodyError } from './lib/http.js';
 import { sniffType, sniffFile } from './lib/sniff.js';
+import * as budget from './lib/budget.js';
+import { priceList, PRICES_CHECKED } from './lib/pricing.js';
 import { today, addDays, formatHuman, formatTime, daysBetween } from './lib/dates.js';
 
 const ITEM_COLUMNS = [
@@ -209,6 +211,7 @@ async function captureCore(body) {
       readerError: result.readerError,
       readerAvailable: result.readerAvailable,
       usedReader: result.usedReader,
+      budget: result.budget,
       diff,
     },
   };
@@ -768,6 +771,12 @@ export async function settingsHandler(req, res) {
       ladders: DEFAULT_LEAD_DAYS.ladders,
       data_dir: DATA_DIR,
       keep_originals: getSetting('keep_originals', true),
+      budget: budget.status(),
+      budget_history: budget.history(),
+      prices: priceList(),
+      prices_checked: PRICES_CHECKED,
+      // Set in .env it cannot be raised from the browser, which is the point.
+      budget_locked: !!process.env.KEVCAL_MONTHLY_BUDGET,
     });
   }
   let body;
@@ -775,6 +784,15 @@ export async function settingsHandler(req, res) {
   if ('lead_days' in body) setSetting('lead_days', body.lead_days);
   if ('timezone' in body) setSetting('timezone', String(body.timezone || '').slice(0, 64));
   if ('keep_originals' in body) setSetting('keep_originals', Boolean(body.keep_originals));
+  if ('monthly_budget' in body) {
+    if (process.env.KEVCAL_MONTHLY_BUDGET) {
+      return badRequest(res, 'the budget is set in .env and cannot be changed from here');
+    }
+    const n = Number(body.monthly_budget);
+    if (body.monthly_budget === null || body.monthly_budget === '') setSetting('monthly_budget', null);
+    else if (Number.isFinite(n) && n >= 0 && n <= 10000) setSetting('monthly_budget', n);
+    else return badRequest(res, 'the budget must be a number of dollars, up to 10000');
+  }
   json(res, 200, { ok: true });
 }
 

@@ -483,6 +483,48 @@ try {
     columns.data.items.every((i) => i.blocked === 0));
   await api(`/api/batches/${columns.data.batch.id}`, { method: 'DELETE' });
 
+  console.log('\\nv2: the spend cap stops BEFORE the money goes');
+  reads({ items: [{
+    title: 'Dentist', kind: 'event', start_date: '2027-01-14', has_explicit_year: true,
+    am_pm_stated: true, confidence: 0.9, source_quote: 'Dentist 14 January 2027',
+  }] });
+
+  const callsBefore = (await api('/api/settings')).data.budget.calls;
+  const zeroCap = await api('/api/settings', { method: 'POST', body: { monthly_budget: 0.001 } });
+  check('a budget can be set', zeroCap.status === 200);
+  const capped = await api('/api/settings');
+  check('and is reported back', capped.data.budget.limit === 0.001, JSON.stringify(capped.data.budget));
+  check('with the month it applies to', /^[0-9]{4}-[0-9]{2}$/.test(capped.data.budget.month || ''), capped.data.budget.month);
+  check('already paused, because one call would exceed it', capped.data.budget.paused === true);
+
+  const refused = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', text: 'Dentist on 4 November 2027', now: '2026-09-10T10:00',
+  } });
+  check('the reader is not called at all', !/fixture/.test(refused.data.engine), refused.data.engine);
+  check('but the import still works, read on-device', refused.data.items.length === 1, refused.data.engine);
+  check('and the user is told why', /paused/i.test(refused.data.readerError || ''), refused.data.readerError);
+  check('nothing was charged for the call that never happened',
+    (await api('/api/settings')).data.budget.calls === callsBefore,
+    `${(await api('/api/settings')).data.budget.calls} vs ${callsBefore}`);
+  await api(`/api/batches/${refused.data.batch.id}`, { method: 'DELETE' });
+
+  await api('/api/settings', { method: 'POST', body: { monthly_budget: 1 } });
+  const allowed = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', text: 'anything', now: '2026-09-10T10:00',
+  } });
+  check('raising the cap lets the reader run again', /fixture/.test(allowed.data.engine), allowed.data.engine);
+  const afterOne = (await api('/api/settings')).data.budget;
+  check('the call is recorded', afterOne.calls === callsBefore + 1, `${afterOne.calls} vs ${callsBefore + 1}`);
+  check('and costed', afterOne.spent > 0, String(afterOne.spent));
+  check('a provider that reports no tokens is still charged as a typical page',
+    afterOne.spent >= 0.001, String(afterOne.spent));
+  await api(`/api/batches/${allowed.data.batch.id}`, { method: 'DELETE' });
+
+  await api('/api/settings', { method: 'POST', body: { monthly_budget: null } });
+  check('the cap can be removed', (await api('/api/settings')).data.budget.limit === null);
+  const rejected = await api('/api/settings', { method: 'POST', body: { monthly_budget: 'lots' } });
+  check('a nonsense budget is refused', rejected.status === 400, String(rejected.status));
+
   readsNothing();
   const fellBack = await api('/api/capture', { method: 'POST', body: {
     kind: 'text', text: 'Dentist on 4 November 2027', now: '2026-09-10T10:00',
