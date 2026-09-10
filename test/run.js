@@ -310,6 +310,44 @@ try {
   const missing = await api('/api/batches/does-not-exist');
   check('unknown batch 404s', missing.status === 404);
 
+  console.log('\nsafety: an upload is what its bytes say, not what its name says');
+  const evilHtml = Buffer.from('<html><script>fetch("/api/agenda").then(r=>r.json())</script></html>').toString('base64');
+  const smuggled = await api('/api/capture', { method: 'POST', body: {
+    kind: 'image', filename: 'holiday-photo.png', data: evilHtml, now: '2026-09-10T10:00',
+  } });
+  check('HTML dressed up as a .png never reaches disk', smuggled.status === 400, String(smuggled.status));
+  check('and is refused in words a person understands',
+    /photo or a PDF/.test(smuggled.data.error || ''), smuggled.data.error);
+
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>').toString('base64');
+  const svgTry = await api('/api/capture', { method: 'POST', body: {
+    kind: 'image', filename: 'chart.svg', data: svg, now: '2026-09-10T10:00',
+  } });
+  check('a scriptable SVG is refused too', svgTry.status === 400, String(svgTry.status));
+
+  const realPng = fs.readFileSync(path.join(ROOT, 'samples/poster.png')).toString('base64');
+  const honest = await api('/api/capture', { method: 'POST', body: {
+    // Lying about the extension the other way round must not matter either.
+    kind: 'image', filename: 'not-really.html', data: realPng, now: '2026-09-10T10:00',
+  } });
+  check('a real image is accepted whatever it is called', honest.status === 200, String(honest.status));
+  const served = await fetch(`${BASE}/api/source/${honest.data.batch.id}`);
+  check('and is served as an image, never as HTML',
+    served.headers.get('content-type') === 'image/png', served.headers.get('content-type'));
+  check('with sniffing turned off in the browser',
+    served.headers.get('x-content-type-options') === 'nosniff');
+  await api(`/api/batches/${honest.data.batch.id}`, { method: 'DELETE' });
+
+  console.log('\nsafety: headers');
+  const shell = await fetch(BASE + '/');
+  const csp = shell.headers.get('content-security-policy') || '';
+  check('the app ships a content security policy', csp.includes("default-src 'self'"), csp.slice(0, 60));
+  const directive = (name) => csp.split(';').map((d) => d.trim()).find((d) => d.startsWith(name));
+  check('scripts may only come from the app itself', directive('script-src') === "script-src 'self'", directive('script-src'));
+  check('and nothing may be embedded as an object', directive('object-src') === "object-src 'none'");
+  check('it cannot be framed', shell.headers.get('x-frame-options') === 'DENY');
+  check('and it leaks no referrer', shell.headers.get('referrer-policy') === 'no-referrer');
+
   // ────────────────────────────────────────────────────────────────────
   //  v2: the reader reads, the checker decides, and nothing is guessed.
   // ────────────────────────────────────────────────────────────────────

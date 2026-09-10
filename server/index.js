@@ -10,6 +10,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './lib/env.js';
 
@@ -108,13 +109,49 @@ function cookies(req) {
   return out;
 }
 
-/** Constant-time-ish compare so the token cannot be guessed a character at a time. */
+/**
+ * Compare digests rather than the strings themselves: it is constant time, and
+ * it does not reveal the length of the real token by returning early.
+ */
 function sameToken(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const digest = (v) => crypto.createHash('sha256').update(v).digest();
+  return crypto.timingSafeEqual(digest(a), digest(b));
 }
+
+/**
+ * A small in-memory limiter. Not a defence against a determined attacker — it
+ * is there so a tunnel URL that leaks cannot be used to grind at the token, or
+ * to burn a day of someone's Gemini free-tier quota in a minute.
+ */
+const hits = new Map();
+function tooMany(key, limit, windowMs) {
+  const now = Date.now();
+  const seen = (hits.get(key) || []).filter((t) => now - t < windowMs);
+  seen.push(now);
+  hits.set(key, seen);
+  if (hits.size > 5000) hits.clear();   // crude, but this never needs to be big
+  return seen.length > limit;
+}
+const clientOf = (req) => req.socket.remoteAddress || 'unknown';
+
+/** Sent on everything. The app loads no third-party anything, so this is tight. */
+const SECURITY_HEADERS = {
+  'content-security-policy': [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",   // inline style attributes on animated cards
+    "img-src 'self' data: blob:",         // the scan preview is a data: URL
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+    "frame-ancestors 'none'",
+  ].join('; '),
+  'referrer-policy': 'no-referrer',
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'DENY',
+};
 
 const LOCK_PAGE = `<!doctype html><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -140,10 +177,16 @@ function unlocked(req, res, url) {
     || cookies(req).kc_token;
   if (sameToken(supplied || '', TOKEN)) {
     if (url.searchParams.get('k')) {
+      // Secure whenever a tunnel terminated TLS in front of us, so the cookie
+      // cannot be picked off a plain-HTTP hop later.
+      const https = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
       res.setHeader('set-cookie',
-        `kc_token=${encodeURIComponent(TOKEN)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax`);
+        `kc_token=${encodeURIComponent(TOKEN)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
     }
     return true;
+  }
+  if (tooMany(`auth:${clientOf(req)}`, 20, 10 * 60_000)) {
+    return json(res, 429, { error: 'too many attempts — wait a few minutes' }), false;
   }
   if (url.pathname.startsWith('/api/')) json(res, 401, { error: 'unauthorised' });
   else send(res, 401, LOCK_PAGE, { 'content-type': 'text/html; charset=utf-8' });
@@ -180,8 +223,17 @@ const server = http.createServer(async (req, res) => {
       return api.serveShare(req, res, isICS ? raw.slice(0, -4) : raw, isICS);
     }
 
+    for (const [h, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(h, v);
+
     if (!unlocked(req, res, url)) return;
     if (crossSiteRejected(req, res, pathname)) return;
+
+    // Reading a page costs money or quota; nothing legitimate needs to do it
+    // dozens of times a minute.
+    if (req.method === 'POST' && (pathname === '/api/capture' || pathname === '/api/quick')
+        && tooMany(`read:${clientOf(req)}`, 120, 10 * 60_000)) {
+      return json(res, 429, { error: 'that is a lot of imports at once — wait a few minutes' });
+    }
 
     const route = matchRoute(req.method, pathname);
     if (route) return await route.handler(req, res, route.params, url);
@@ -232,7 +284,15 @@ server.listen(PORT, HOST, () => {
       : `${READER_LABEL[readerName()] || readerName()} (${readerModel() || '—'}) — pages are uploaded to read them`;
   console.log(`  Reading        ${reading}`);
   console.log(`  Cross-check    ${ocrAvailable() ? 'on-device OCR + date grammar' : 'date grammar only (run: npm run build:tools)'}`);
-  console.log(`  Door           ${TOKEN ? 'locked — the link needs ?k=…' : 'OPEN — set KEVCAL_TOKEN before putting this on a tunnel'}`);
+  console.log(`  Door           ${TOKEN
+    ? 'locked — the link needs ?k=…'
+    : `OPEN to everything on this network${HOST === '127.0.0.1' ? ' (localhost only)' : ''}`}`);
   console.log(`  Data           ${DATA_DIR}`);
   console.log('');
+  if (!TOKEN && HOST !== '127.0.0.1') {
+    console.log('  ⚠  No KEVCAL_TOKEN, so anything on your wifi can read what you import.');
+    console.log('     Fine at home; NOT fine behind a tunnel. To lock it:');
+    console.log(`       echo "KEVCAL_TOKEN=$(openssl rand -base64 24 2>/dev/null || echo change-me)" >> .env`);
+    console.log('');
+  }
 });

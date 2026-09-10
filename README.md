@@ -151,6 +151,36 @@ token, not an account system — treat the link like a password.
 
 ---
 
+## Read this before using a free-tier Gemini key
+
+Google's API terms draw a hard line between the free and paid tiers, and it is
+about your data, not your money:
+
+> **Unpaid Services:** "Google uses the content you submit to the Services and any
+> generated responses to provide, improve, and develop Google products" — and
+> "human reviewers may read, annotate, and process your API input and output".
+> The terms then say plainly: *"Do not submit sensitive, confidential, or personal
+> information to the Unpaid Services."*
+>
+> **Paid Services:** "Google doesn't use your prompts … or responses to improve our
+> products."
+
+What KevCal sends is photographs of school letters. Those name your children,
+their school, their class and teacher, and often an address or a payment amount.
+That is exactly the personal information Google's own terms tell you not to send
+to the free tier.
+
+**Three ways to be on the right side of that:**
+
+| | |
+|---|---|
+| **Attach a Cloud Billing account to Google AI Studio** | Flips you to the paid terms, so nothing you send trains anything. Set a spend limit at the same time. |
+| **Use OpenAI instead** (`OPENAI_API_KEY`) | "data sent to the OpenAI API is not used to train or improve OpenAI models (unless you explicitly opt in)". Abuse logs are kept 30 days. |
+| **Use no key at all** | The on-device reader never leaves the Mac. Worse on real documents — see PROGRESS.md — but nothing is uploaded. |
+
+The free tier is fine for trying KevCal on a poster or a made-up letter. It is
+the wrong place for your kids' post.
+
 ## Your API key
 
 It lives in `.env`, which is git-ignored and never leaves this machine. It is

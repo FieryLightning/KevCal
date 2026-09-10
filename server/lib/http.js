@@ -18,7 +18,7 @@ const MIME = {
 
 export function send(res, status, body, headers = {}) {
   const payload = Buffer.isBuffer(body) ? body : Buffer.from(String(body ?? ''), 'utf8');
-  res.writeHead(status, { 'content-length': payload.length, ...headers });
+  res.writeHead(status, { 'content-length': payload.length, 'x-content-type-options': 'nosniff', ...headers });
   res.end(payload);
 }
 
@@ -69,15 +69,21 @@ export async function readJSON(req) {
   catch { throw new Error('invalid JSON body'); }
 }
 
-export function serveFile(res, filePath, { download = null, cache = 'no-store' } = {}) {
+/**
+ * `contentType` overrides the extension. User-uploaded files are served with a
+ * type sniffed from their bytes, never one inferred from a name a client chose:
+ * a file called .html served from this origin is script running as you.
+ */
+export function serveFile(res, filePath, { download = null, cache = 'no-store', contentType = null } = {}) {
   let stat;
   try { stat = fs.statSync(filePath); } catch { return notFound(res, 'file not found'); }
   if (!stat.isFile()) return notFound(res, 'not a file');
   const ext = path.extname(filePath).toLowerCase();
   const headers = {
-    'content-type': MIME[ext] || 'application/octet-stream',
+    'content-type': contentType || MIME[ext] || 'application/octet-stream',
     'content-length': stat.size,
     'cache-control': cache,
+    'x-content-type-options': 'nosniff',
   };
   if (download) headers['content-disposition'] = `attachment; filename="${download.replace(/"/g, '')}"`;
   res.writeHead(200, headers);

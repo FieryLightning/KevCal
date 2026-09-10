@@ -11,6 +11,7 @@ import { extract, assessRisk, readerAvailable, readerName, readerModel } from '.
 import { buildICS } from './lib/ics.js';
 import { diffItems, describeDiff } from './lib/diff.js';
 import { json, badRequest, notFound, readJSON, serveFile, fromBodyError } from './lib/http.js';
+import { sniffType, sniffFile } from './lib/sniff.js';
 import { today, addDays, formatHuman, formatTime, daysBetween } from './lib/dates.js';
 
 const ITEM_COLUMNS = [
@@ -134,10 +135,14 @@ async function captureCore(body) {
   if (kind !== 'text') {
     if (!body.data) return fail(400, 'no image data supplied');
     const b64 = String(body.data).replace(/^data:[^;]+;base64,/, '');
-    const ext = kind === 'pdf' ? '.pdf' : path.extname(body.filename || '') || '.png';
-    storedName = `${id('src_')}${ext}`;
+    const bytes = Buffer.from(b64, 'base64');
+    // The client's filename is not evidence of anything. Identify the file by
+    // its leading bytes, and let those bytes choose the name it is stored under.
+    const sniffed = sniffType(bytes);
+    if (!sniffed) return fail(400, 'that does not look like a photo or a PDF');
+    storedName = `${id('src_')}${sniffed.ext}`;
     filePath = path.join(ORIGINALS_DIR, storedName);
-    try { fs.writeFileSync(filePath, Buffer.from(b64, 'base64')); }
+    try { fs.writeFileSync(filePath, bytes, { mode: 0o600 }); }
     catch (e) { return fail(400, `could not save image: ${e.message}`); }
   } else if (!String(body.text || '').trim()) {
     return fail(400, 'no text supplied');
@@ -800,7 +805,12 @@ export async function anchorsHandler(req, res) {
 export function sourceImage(req, res, batchId) {
   const batch = getBatch(batchId);
   if (!batch?.source_path) return notFound(res, 'no source image');
-  serveFile(res, path.join(ORIGINALS_DIR, batch.source_path), { cache: 'private, max-age=3600' });
+  const file = path.join(ORIGINALS_DIR, batch.source_path);
+  // Sniffed again on the way out, so even a file that predates the check above
+  // cannot be served as anything executable.
+  const sniffed = sniffFile(fs, file);
+  if (!sniffed) return notFound(res, 'no source image');
+  serveFile(res, file, { cache: 'private, max-age=3600', contentType: sniffed.mime });
 }
 
 export function stats(req, res) {
