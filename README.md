@@ -1,121 +1,171 @@
 # KevCal
 
-**Turns a photo, screenshot or PDF of anything with dates on it into calendar
-entries — showing you where each one came from, and undoing the whole import
-with one button.**
+**Point your phone at anything with a date on it, and get a calendar entry —
+without it ever quietly inventing the date.**
 
-School letters, class timetables, posters, service reminders, emails. Point at
-it, check what it found, add it.
+School letters, timetables, posters, appointment cards, service reminders,
+screenshots of emails. Photograph it, check what it found, add it.
 
 ---
 
-## Run it
+## The one idea
+
+The first version of KevCal read documents with a pile of hand-written date
+patterns. It was fast and private and it was **confidently wrong** often enough
+to be dangerous — at one point it read *"Contract ends December 2031"* and filed
+it as **20 December 2025, at 94% confidence**, because the day pattern ate the
+first two digits of the year.
+
+A wrong date is worse than a missing one, because it is silent. So v2 splits the
+job in two, and neither half is allowed to do the other's work:
+
+| | |
+|---|---|
+| **The reader** (Gemini *or* OpenAI — your choice) | Looks at the page and reports *what is printed*: the words, the weekday as written, whether a year appeared at all, whether am/pm was stated. It is explicitly forbidden from doing calendar arithmetic — "tomorrow" comes back as the word "tomorrow", not as a date. |
+| **The checker** (`server/extract/verify.js`) | Does every calculation, in one testable place. It re-reads the reader's own quoted text, compares the weekday against the date, checks the year is actually on the page, and sanity-checks how far away the date is. |
+
+When those two disagree, KevCal does not pick a winner. It asks you.
+
+### Which reader?
+
+Both get the *same* instructions and return the *same* shape — `server/extract/contract.js`
+is shared, and `verify.js` downstream cannot tell them apart. Swapping providers
+changes accuracy and cost, never the safety rules. Set either key, or both plus
+`KEVCAL_READER`.
+
+| | Gemini | OpenAI |
+|---|---|---|
+| **Bounding boxes** | native — it boxes the phrase it read, so the highlight-on-your-photo works on its own | weaker; provenance falls back to matching the quote against the on-device OCR |
+| **Schema enforcement** | asked for, mostly honoured | `strict: true` — the API validates the shape, so the answer *cannot* come back malformed |
+| **PDFs** | native document input | native, pages read as images |
+| **Default** | picked first when both keys are present | `KEVCAL_READER=openai` to force |
+
+On a Mac with `npm run build:tools` done, geometry comes from the on-device OCR
+anyway, so the box difference mostly disappears and the choice comes down to
+price and which key you already have.
+
+---
+
+## What it will not do
+
+- **It will not guess a date it cannot work out.** No date is better than a wrong
+  one. It says what it could not resolve and gives you a box to type in.
+- **It will not silently fix an impossible date.** "29 February 2027" comes back
+  as *unreadable*, never rounded to a nearby real day.
+- **It will not resolve "tomorrow" without saying what it counted from.** If the
+  letter dates itself, it counts from the letter. If it doesn't, it counts from
+  today *and tells you it did that.*
+- **It will not ignore the clock.** Import at **00:20** and "tomorrow" becomes a
+  question, because a letter written last night means the day that has, by the
+  clock, already started. You get both days as buttons.
+- **It will not assume a date is in the future.** Anything already past, or more
+  than about 18 months out, is flagged — those are almost always misreads.
+- **It will not invent a repeat.** "Every other Tuesday" is quoted back at you as
+  a suggestion you tap, never a rule it writes. A repeat always needs an end.
+
+Everything it *did* have to assume — a missing year, an unstated am/pm — is
+stated in plain words on the card, with the other reading one tap away.
+
+Two levels of flag:
+
+- **Needs your answer** (red) — the app has no answer, or two sources disagree.
+  It cannot reach your calendar until you resolve it.
+- **Worth a check** (amber) — there was a defensible answer but a choice was
+  made. It goes through, but it says so.
+
+---
+
+## Getting it running
+
+### 1. What you need
+
+| | | |
+|---|---|---|
+| **Node 22.5+** | required | `node -v`. Nothing to `npm install` — KevCal has no dependencies. |
+| **One reading key** | strongly recommended | Either [aistudio.google.com](https://aistudio.google.com) → **Get API key** (Gemini), or [platform.openai.com](https://platform.openai.com) (OpenAI). See the trade below. |
+| **Xcode Command Line Tools** | recommended | `xcode-select --install`. Builds the on-device reader used for the cross-check and as the offline fallback. |
+| **A tunnel** | only to leave your wifi | `brew install cloudflared`. See below. |
+
+### 2. Set it up
 
 ```bash
 cd ~/KevCal
-npm run build:tools     # once — compiles the on-device reader (needs Xcode CLT)
+cp .env.example .env      # paste in a Gemini key OR an OpenAI key
+npm run build:tools       # once — compiles the on-device cross-checker
 npm start
 ```
 
-Then open **http://localhost:4321**, or the `http://192.168.x.x:4321` address it
-prints, on your phone on the same wifi. Add it to your home screen and it behaves
-like an app.
+It prints the addresses to open, and states plainly which engine is reading your
+documents and whether the door is locked.
 
-There is **no `npm install`** — KevCal has zero dependencies. Node 22.5+ (for
-`node:sqlite`), macOS for the on-device reader.
+### 3. Put it on your phone
+
+Open the address it printed in Safari, tap **Share → Add to Home Screen**. It
+runs full screen with its own icon.
+
+### 4. Capture from the share sheet (the part that matters)
+
+The reason v1 didn't get used wasn't the reading — it was that you had to
+remember to open it. Build this once in **Shortcuts** and KevCal appears in the
+iOS share sheet, so a photo goes from Photos or Mail straight into it:
+
+1. Shortcuts → **+** → tap ⓘ → turn on **Show in Share Sheet**.
+2. **Base64 Encode** ← Shortcut Input.
+3. **Get contents of URL** → `https://your-address/api/quick`, POST, header
+   `Content-Type: application/json`, body **JSON**:
+   `data` = the Base64 result, `filename` = `photo.jpg`,
+   `now` = Current Date formatted `yyyy-MM-dd'T'HH:mm`.
+4. **Open URLs** ← the `url` value from the response. Name it *KevCal*.
+
+The exact steps, with your own address filled in, are in **Settings**.
+
+### 5. Leaving your own wifi
+
+A laptop on your home network is only reachable at home. To reach it from the
+school gate:
 
 ```bash
-npm test        # 66 end-to-end tests
-npm run samples # regenerate the example documents in samples/
+# in .env, first:  KEVCAL_TOKEN=$(openssl rand -base64 24)
+cloudflared tunnel --url http://localhost:4321
 ```
+
+**Set `KEVCAL_TOKEN` before you do this.** Without it, anyone who finds the URL
+can read your imported letters. With it, every request needs the key, and the
+link you saved to your home screen (`…/?k=…`) carries it for you. It is a bearer
+token, not an account system — treat the link like a password.
 
 ---
 
-## Where your stuff goes
+## Where your things go
 
 Everything lives in `./data` on your own machine: a SQLite file and the original
-images. There is no account, no sign-in, and no server anywhere else.
+images. No account, no sign-in, nothing synced anywhere.
 
-**Nothing leaves your Mac.** Images are read on-device by macOS's Vision
-framework. The app prints its outbound story on startup, and the header shows
-`on-device` whenever that is true.
-
-The one exception is opt-in and off by default: if you set `ANTHROPIC_API_KEY`
-*and* switch on AI reading in Settings, the image you are importing is sent to
-`api.anthropic.com` to be read. The header changes to `AI reading on` so you can
-never be in that state without seeing it. Everything works without it.
+**The exception, stated plainly:** when a Gemini key is set, the page you import
+is uploaded to Google to be read. That is the whole trade v2 makes — real
+accuracy on real documents in exchange for the "nothing leaves this Mac" promise
+v1 could make. The header says `read by Gemini` whenever that is true, and with
+no key the app falls back to reading entirely on-device.
 
 Deleting an import deletes its original image too.
 
 ---
 
-## How it reads a document
+## The rest of what it does
 
-Three tiers, tried in order. You can stop at any of them.
-
-| Tier | What it does | Needs |
-|---|---|---|
-| **Vision** | Apple's on-device OCR: text plus a bounding box for every line | macOS |
-| **Grammar** | Deterministic date/time parsing — `Thursday 12 March`, `4:30pm to 7:30pm`, `w/c 18 Nov`, `Wk 7 (Fri)`, ranges, deadline wording | nothing |
-| **AI** *(optional, off)* | Claude reads messy layouts, dense grids, bad handwriting | an API key |
-
-It also groups table rows, so `Critical appraisal │ Wk 7 (Fri) │ 25%` stays one
-thing instead of three.
-
----
-
-## The rules it follows
-
-These came out of four user interviews (`research/`), and they are the reason it
-behaves the way it does.
-
-**It will not invent a repeat.** All four people interviewed said, without being
-asked, that a wrong recurring event is worse than none at all — because it is
-silent, and it makes you distrust the entries that *are* right. So KevCal creates
-only the dates the document actually shows, then offers *"these look like every
-other Tuesday — collapse them?"* as something you tap. A repeat always needs an
-end date; it will not extrapolate past the evidence.
-
-**It shows you where every date came from.** Every entry keeps its source image,
-the exact text it was read from, and how it was interpreted (`w/c 18 Nov → week
-beginning Mon 17 Nov`). Tap a row and its box lights up on the original. If you
-have to reopen the document to trust the output, the tool has saved you nothing.
-
-**It asks instead of guessing.** "Homework club every Tuesday" with no start date
-in the document becomes a question, not a guess. "Wk 7 (Fri)" resolves properly
-if the document says when week 1 begins — or if you set a term in Settings —
-and otherwise it asks.
-
-**It only makes you review what it is unsure about.** A poster with one clear
-date goes straight to a confirm card. Anything uncertain, or longer than a few
-items, gets the review table with the doubtful rows first and the confident ones
-folded away. Low-confidence entries cannot be added until you have touched them.
-
-**Undo is one button, forever.** Every import is a batch. That single idea is
-also how you bulk-edit, how you share, and how a re-issued document is
-reconciled. *Imports → Undo* removes the whole thing, and *Restore* puts it back.
-
-**A deadline is not an event.** It is a wall with a runway in front of it, so it
-gets escalating reminders (30/14/7/2/0 days by default, editable) and a *Mark
-sorted* state that silences it without deleting it. Those reminders are written
-into the calendar entry itself, so they fire whether or not KevCal is running.
-
-**Re-importing diffs; it does not duplicate.** Import the amended letter against
-the original and you get *"1 changed, 1 added"* — not two parents' evenings.
-Anything you edited by hand is protected and never silently reverted.
-
----
-
-## Sharing
-
-The person you send it to installs nothing and signs up for nothing. From any
-import, *Share* gives you:
-
-- **Plain text** — pasteable into WhatsApp, email or Slack. Often the only
-  channel that is actually allowed.
-- **An image card** — what people really forward in a group chat.
-- **A `.ics` file** — lands in Apple Calendar, Outlook or Google.
-- **A subscribable feed** — `/s/<token>.ics`, added once and updating in place.
+- **Every import is one batch** — which is also the unit of undo, of bulk edit,
+  of sharing, and of reconciling a re-issued document. *Imports → Undo* takes the
+  whole thing back out; *Restore* puts it back.
+- **Provenance on everything.** Tap a date and you get the crop of the page it
+  was read from, the exact quoted text, and how it was interpreted.
+- **Re-import diffs, it doesn't duplicate.** The amended letter gives you
+  *"1 changed, 1 added"* — and anything you edited by hand is never reverted.
+- **Deadlines aren't events.** They get escalating reminders (30/14/7/2/0 days by
+  default), a runway bar, and a *sorted* state that silences without deleting.
+- **Sharing installs nothing.** Plain text, a `.ics` file, or a subscribable feed
+  you can revoke.
+- **Times carry a real timezone**, so a shared calendar doesn't shift hours for
+  whoever opens it.
 
 ---
 
@@ -123,32 +173,42 @@ import, *Share* gives you:
 
 ```
 server/
-  index.js          HTTP server and routes
-  api.js            handlers — batches, items, sharing, settings
+  index.js          HTTP, routing, the token lock
+  api.js            batches, items, sharing, settings
   db.js             SQLite schema (node:sqlite, no native build)
   extract/
-    index.js        orchestrator + risk scoring
-    grammar.js      the date/time/deadline/recurrence grammar
-    build.js        raw hits -> reviewable items, confidence, provenance
-    rows.js         table-row grouping
-    anthropic.js    optional AI tier
+    gemini.js       the reader — reports what is printed, does no arithmetic
+    verify.js       the checker — every calculation and every flag lives here
+    index.js        orchestrator: reader + on-device cross-check, or fallback
+    grammar.js      deterministic date parsing (fallback engine AND cross-check)
+    build.js        grammar path: raw hits -> items      rows.js  table grouping
   lib/
-    dates.js  ics.js  diff.js  http.js
-public/             the whole front end, no build step
-tools/ocr.swift     on-device OCR (Apple Vision)
-research/           the user interviews and the rules drawn from them
-test/run.js         end-to-end tests
+    ics.js  dates.js  diff.js  http.js  env.js
+public/             the whole front end — no build step, no framework
+tools/              ocr.swift (on-device reader)   make-icon.mjs (app icons)
+test/
+  verify.test.js    the checking rules, unit tested
+  run.js            end-to-end against a live server
 ```
+
+## Testing
+
+```bash
+npm test
+```
+
+213 tests, no API key needed and no network calls: the reader is driven from a
+recorded fixture (`KEVCAL_FAKE_READER`), so every flag has an end-to-end test
+that costs nothing and never flakes.
 
 ---
 
 ## Not in this version
 
-- **Rota-style grids.** Finding *one person's row* in a dense 30-person matrix of
-  two-letter shift codes is a genuinely different problem from reading a poster,
-  and doing it at 84% accuracy is worse than not doing it.
+- **Rota grids.** Finding one person's row in a 30-person matrix of two-letter
+  shift codes is a different problem, and doing it at 84% accuracy is worse than
+  not doing it.
+- **Live Google/Outlook sync.** `.ics` reaches all of them today with no OAuth.
 - **Deadline chains** (a live date deriving prep deadlines backwards). The
   `derived_from` column exists so this is additive.
-- **Live Google/Outlook sync.** `.ics` reaches all of them today without an OAuth
-  review.
 - **Anything multi-user.** One person's machine, one person's calendar.

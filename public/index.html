@@ -1,129 +1,257 @@
 <!doctype html>
-<html lang="en-GB">
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#f6f5f2">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=5">
 <title>KevCal</title>
-<link rel="stylesheet" href="/styles.css">
-<link rel="manifest" href="/manifest.webmanifest">
+<meta name="description" content="Point your phone at anything with a date on it.">
+<meta name="theme-color" content="#f7f6f3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0e0e14" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="KevCal">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" href="/icon-192.png">
+<link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 
-<header class="top">
-  <div class="brand">Kev<span>Cal</span></div>
-  <div class="spacer"></div>
-  <div class="pill local" id="privacyPill" title="Where your images are read">stays on this Mac</div>
+<div class="live" id="live" aria-live="polite" aria-atomic="true"></div>
+
+<header class="topbar" id="topbar">
+  <div class="brand"><img src="/icon-192.png" alt="" width="26" height="26"><span>Kev<b>Cal</b></span></div>
+  <div class="grow"></div>
+  <button class="chip-btn" id="readerChip" type="button" title="How your documents are read">…</button>
 </header>
 
-<div aria-live="polite" aria-atomic="true" class="sr-only" id="liveRegion"></div>
+<main id="main">
 
-<nav class="tabs" role="tablist" aria-label="Sections">
-  <button role="tab" data-view="capture" aria-selected="true" aria-controls="view-capture"><span class="ico">📸</span>Capture</button>
-  <button role="tab" data-view="dates" aria-selected="false" aria-controls="view-dates"><span class="ico">🗓️</span>Dates</button>
-  <button role="tab" data-view="imports" aria-selected="false" aria-controls="view-imports"><span class="ico">📥</span>Imports</button>
-  <button role="tab" data-view="settings" aria-selected="false" aria-controls="view-settings"><span class="ico">⚙️</span>Settings</button>
-</nav>
-
-<main>
-
-  <!-- ============ CAPTURE ============ -->
-  <section class="view active" id="view-capture" role="tabpanel" tabindex="-1">
-    <div class="dropzone" id="dropzone">
-      <div class="glyph">📸</div>
-      <h2>Point it at anything with dates on it</h2>
-      <p>A school letter, a poster, a timetable, a service reminder, an email.</p>
-      <div class="actions">
-        <button class="btn primary big" id="btnCamera">Take a photo</button>
-        <button class="btn big" id="btnFile">Choose a file</button>
-      </div>
-      <p class="hint">or drop a file here · press <kbd>⌘V</kbd> to paste a screenshot</p>
+  <!-- ══════════════════════════ DATES ══════════════════════════ -->
+  <section class="view show" id="view-dates" data-view="dates">
+    <div class="hero">
+      <h1 id="datesHeadline">Your dates</h1>
+      <p class="sub" id="datesSub">Loading…</p>
     </div>
+    <div id="datesList" class="stack"></div>
+  </section>
 
-    <input type="file" id="fileCamera" accept="image/*" capture="environment" hidden>
-    <input type="file" id="filePicker" accept="image/*,application/pdf" hidden>
+  <!-- ══════════════════════════ IMPORTS ══════════════════════════ -->
+  <section class="view" id="view-imports" data-view="imports">
+    <div class="hero"><h1>Imports</h1><p class="sub">Every capture is one batch. Undo takes back the whole thing.</p></div>
+    <div id="importsList" class="stack"></div>
+  </section>
 
-    <details class="collapsed-ok" style="margin-top:14px">
-      <summary>Paste text instead</summary>
-      <textarea class="paste" id="pasteText" placeholder="Paste an email, a message, or any text with dates in it…"></textarea>
-      <div class="actions" style="justify-content:flex-start">
-        <button class="btn" id="btnPasteGo">Find the dates</button>
+  <!-- ══════════════════════════ SHARED ══════════════════════════ -->
+  <section class="view" id="view-shared" data-view="shared">
+    <div class="hero"><h1>Shared</h1><p class="sub">Links you've handed out. Whoever you sent them to installs nothing.</p></div>
+    <div id="sharedList" class="stack"></div>
+  </section>
+
+  <!-- ══════════════════════════ SETTINGS ══════════════════════════ -->
+  <section class="view" id="view-settings" data-view="settings">
+    <div class="hero"><h1>Settings</h1><p class="sub">Set these once.</p></div>
+    <div class="stack">
+
+      <div class="card">
+        <h3>How pages get read</h3>
+        <div id="readerStatus" class="status">…</div>
       </div>
-    </details>
 
-    <div id="captureResult"></div>
-  </section>
-
-  <!-- ============ DATES ============ -->
-  <section class="view" id="view-dates" role="tabpanel" tabindex="-1">
-    <div id="datesContent"><div class="empty"><span class="glyph">🗓️</span>Nothing yet.</div></div>
-  </section>
-
-  <!-- ============ IMPORTS ============ -->
-  <section class="view" id="view-imports" role="tabpanel" tabindex="-1">
-    <div id="importsContent"><div class="empty"><span class="glyph">📥</span>No imports yet.</div></div>
-  </section>
-
-  <!-- ============ SETTINGS ============ -->
-  <section class="view" id="view-settings" role="tabpanel" tabindex="-1">
-    <div class="card">
-      <h3>Where your stuff lives</h3>
-      <p class="muted" id="privacyText">Loading…</p>
-    </div>
-    <div class="card">
-      <h3>Reminders</h3>
-      <p class="muted">How far ahead you get nudged, in days. These are written into the calendar entry itself, so the reminders fire whether or not KevCal is running.</p>
-      <div class="field-row">
-        <div class="field">
-          <label>Deadlines — days before</label>
-          <input id="leadDeadline" placeholder="30, 14, 7, 2, 0">
-        </div>
-        <div class="field">
-          <label>Events — days before</label>
-          <input id="leadEvent" placeholder="1, 0">
+      <div class="card">
+        <h3>Your timezone</h3>
+        <p class="muted">Every time KevCal exports is anchored to this, so a shared calendar doesn't shift hours for whoever opens it.</p>
+        <div class="row">
+          <input id="tzInput" placeholder="Europe/London" autocapitalize="off" autocorrect="off" spellcheck="false">
+          <button class="btn" id="btnTzDetect" type="button">Use this phone's</button>
         </div>
       </div>
-      <button class="btn" id="btnSaveLeads">Save</button>
-    </div>
-    <div class="card">
-      <h3>Term dates <span class="chip">optional</span></h3>
-      <p class="muted">Documents that say “Wk 7 (Fri)” or “w/c 18 Nov” need to know when week 1 starts. Set it once and those resolve automatically.</p>
-      <div class="field-row">
-        <div class="field"><label>Name</label><input id="anchorName" placeholder="Autumn term"></div>
-        <div class="field"><label>Monday of week 1</label><input id="anchorStart" type="date"></div>
+
+      <div class="card">
+        <h3>Reminder ladders</h3>
+        <p class="muted">Days before, written into the calendar entry itself — so they fire whether or not KevCal is running.</p>
+        <div class="row">
+          <label class="field"><span>Deadlines</span><input id="leadDeadline" inputmode="numeric" placeholder="30, 14, 7, 2, 0"></label>
+          <label class="field"><span>Events</span><input id="leadEvent" inputmode="numeric" placeholder="1, 0"></label>
+        </div>
+        <button class="btn primary" id="btnSaveLeads" type="button">Save</button>
       </div>
-      <div class="field">
-        <label>Non-teaching weeks (Mondays, comma separated) — these don't count towards week numbers</label>
-        <input id="anchorSkips" placeholder="2025-11-03">
+
+      <div class="card">
+        <h3>Add to your phone <span class="pill">3 steps</span></h3>
+        <ol class="steps" id="installSteps"></ol>
       </div>
-      <div class="actions" style="justify-content:flex-start;margin-top:10px">
-        <button class="btn" id="btnSaveAnchor">Save term</button>
+
+      <div class="card">
+        <h3>Capture from the share sheet</h3>
+        <p class="muted">Build this once in the Shortcuts app and you can send a photo to KevCal straight from Photos, Mail or Safari — no need to open the app first.</p>
+        <ol class="steps" id="shortcutSteps"></ol>
       </div>
-      <div id="anchorList" class="muted" style="margin-top:10px"></div>
-    </div>
-    <div class="card">
-      <h3>AI reading <span class="chip" id="aiChip">off</span></h3>
-      <p class="muted" id="aiText">Loading…</p>
-      <button class="btn" id="btnToggleAI" hidden>Turn on</button>
+
+      <div class="card">
+        <h3>Term dates <span class="pill">optional</span></h3>
+        <p class="muted">Only needed for documents that say “Wk 7 (Fri)”. Set when week 1 starts and those resolve instead of asking.</p>
+        <div class="row">
+          <label class="field"><span>Name</span><input id="anchorName" placeholder="Autumn term"></label>
+          <label class="field"><span>Monday of week 1</span><input id="anchorStart" type="date"></label>
+        </div>
+        <button class="btn" id="btnSaveAnchor" type="button">Save term</button>
+        <div id="anchorList" class="muted small"></div>
+      </div>
+
     </div>
   </section>
 
 </main>
 
-<dialog id="shareDialog"><div class="dlg-body">
-  <h3>Share these dates</h3>
-  <p class="muted">Whoever you send this to doesn't need the app, an account, or a link they have to trust.</p>
-  <pre class="sharetext" id="shareText">…</pre>
-  <div class="actions" style="justify-content:flex-start">
-    <button class="btn primary" id="btnCopyText">Copy as text</button>
-    <button class="btn" id="btnShareIcs">Download .ics</button>
-    <button class="btn" id="btnShareImage">Save as image</button>
-    <button class="btn" id="btnSubscribe">Copy subscribe link</button>
-    <button class="btn ghost" id="btnCloseShare">Close</button>
+<!-- ══════════════════════════ TAB BAR ══════════════════════════ -->
+<nav class="tabbar" id="tabbar">
+  <button class="tab on" data-go="dates" type="button">
+    <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/></svg><span>Dates</span>
+  </button>
+  <button class="tab" data-go="imports" type="button">
+    <svg viewBox="0 0 24 24"><path d="M12 3v12m0 0 4-4m-4 4-4-4"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg><span>Imports</span>
+  </button>
+  <button class="fab" id="btnCapture" type="button" aria-label="Capture a document">
+    <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13" r="3.4"/></svg>
+  </button>
+  <button class="tab" data-go="shared" type="button">
+    <svg viewBox="0 0 24 24"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><path d="m8.4 10.7 7.2-4.2M8.4 13.3l7.2 4.2"/></svg><span>Shared</span>
+  </button>
+  <button class="tab" data-go="settings" type="button">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.6v3M12 18.4v3M21.4 12h-3M5.6 12h-3M18.6 5.4 16.5 7.5M7.5 16.5l-2.1 2.1M18.6 18.6 16.5 16.5M7.5 7.5 5.4 5.4"/></svg><span>Settings</span>
+  </button>
+</nav>
+
+<!-- ══════════════════════════ CAPTURE CHOOSER ══════════════════════════ -->
+<div class="sheet-wrap" id="chooser" hidden>
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="grabber"></div>
+    <h2>What are you looking at?</h2>
+    <div class="choices">
+      <button class="choice" id="pickCamera" type="button"><span class="ico">📸</span><b>Take a photo</b><i>A letter, a poster, a noticeboard</i></button>
+      <button class="choice" id="pickLibrary" type="button"><span class="ico">🖼️</span><b>From your photos</b><i>A screenshot you already took</i></button>
+      <button class="choice" id="pickFile" type="button"><span class="ico">📄</span><b>A file or PDF</b><i>A newsletter, a term calendar</i></button>
+      <button class="choice" id="pickText" type="button"><span class="ico">✍️</span><b>Paste some text</b><i>An email or a message</i></button>
+    </div>
   </div>
-</div></dialog>
+</div>
+
+<input type="file" id="fileCamera" accept="image/*" capture="environment" hidden>
+<input type="file" id="fileLibrary" accept="image/*" hidden>
+<input type="file" id="filePicker" accept="image/*,application/pdf" hidden>
+
+<!-- ══════════════════════════ PASTE TEXT ══════════════════════════ -->
+<div class="sheet-wrap" id="textSheet" hidden>
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="grabber"></div>
+    <h2>Paste the text</h2>
+    <textarea id="pasteBox" rows="7" placeholder="Paste an email, a message, anything with dates in it…"></textarea>
+    <button class="btn primary big" id="btnReadText" type="button">Find the dates</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════ SCANNER ══════════════════════════ -->
+<div class="overlay" id="scanner" hidden>
+  <div class="scan-stage">
+    <div class="scan-frame">
+      <img id="scanImg" alt="">
+      <div class="scan-doc" id="scanDoc" hidden></div>
+      <div class="scan-beam"></div>
+      <svg class="scan-boxes" id="scanBoxes" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="scan-status">
+      <div class="dots"><i></i><i></i><i></i></div>
+      <p id="scanText">Reading the page…</p>
+    </div>
+    <button class="btn ghost" id="scanCancel" type="button">Cancel</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════ REVIEW ══════════════════════════ -->
+<div class="overlay sheetful" id="review" hidden>
+  <header class="ov-top">
+    <button class="icon-btn" id="reviewClose" type="button" aria-label="Close">✕</button>
+    <div class="ov-title" id="reviewTitle">Found</div>
+    <button class="icon-btn" id="reviewSource" type="button" aria-label="See the original">🔍</button>
+  </header>
+  <div class="ov-body">
+    <div class="found">
+      <div class="found-n"><span id="foundCount">0</span></div>
+      <div class="found-txt"><b id="foundLabel">dates found</b><i id="foundSub"></i></div>
+    </div>
+    <div id="diffBanner"></div>
+    <div id="reviewList" class="stack"></div>
+  </div>
+  <footer class="ov-foot">
+    <button class="btn ghost" id="btnDiscard" type="button">Discard</button>
+    <button class="btn primary big grow" id="btnAdd" type="button">Add to calendar</button>
+  </footer>
+</div>
+
+<!-- ══════════════════════════ ITEM EDITOR ══════════════════════════ -->
+<div class="sheet-wrap" id="editor" hidden>
+  <div class="scrim" data-close></div>
+  <div class="sheet tall">
+    <div class="grabber"></div>
+    <div id="editCrop" class="crop"></div>
+    <div id="editFlags"></div>
+    <label class="field"><span>What is it?</span><input id="edTitle" placeholder="Title"></label>
+    <div class="seg" id="edKind">
+      <button data-kind="event" type="button">Event</button>
+      <button data-kind="deadline" type="button">Deadline</button>
+    </div>
+    <div class="row">
+      <label class="field"><span>Date</span><input id="edDate" type="date"></label>
+      <label class="field"><span>Ends</span><input id="edEndDate" type="date"></label>
+    </div>
+    <label class="switch"><input type="checkbox" id="edAllDay"><span></span><b>All day</b></label>
+    <div class="row" id="edTimes">
+      <label class="field"><span>Starts</span><input id="edStart" type="time"></label>
+      <label class="field"><span>Ends</span><input id="edEnd" type="time"></label>
+    </div>
+    <label class="field"><span>Where</span><input id="edWhere" placeholder="Optional"></label>
+    <label class="field"><span>Notes</span><textarea id="edNotes" rows="2" placeholder="Optional"></textarea></label>
+    <div class="row sticky-actions">
+      <button class="btn ghost" id="edDelete" type="button">Remove</button>
+      <button class="btn primary grow" id="edSave" type="button">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════ SOURCE VIEWER ══════════════════════════ -->
+<div class="overlay dark" id="viewer" hidden>
+  <button class="icon-btn floating" id="viewerClose" type="button" aria-label="Close">✕</button>
+  <div class="viewer-stage">
+    <div class="viewer-frame">
+      <img id="viewerImg" alt="The document this came from">
+      <svg class="scan-boxes" id="viewerBoxes" viewBox="0 0 100 100" preserveAspectRatio="none"></svg>
+    </div>
+  </div>
+  <p class="viewer-cap" id="viewerCap"></p>
+</div>
+
+<!-- ══════════════════════════ SHARE ══════════════════════════ -->
+<div class="sheet-wrap" id="shareSheet" hidden>
+  <div class="scrim" data-close></div>
+  <div class="sheet">
+    <div class="grabber"></div>
+    <h2>Send these dates</h2>
+    <p class="muted">Whoever gets this installs nothing and signs up for nothing.</p>
+    <pre class="sharetext" id="shareText"></pre>
+    <div class="choices two">
+      <button class="choice" id="shCopy" type="button"><span class="ico">📋</span><b>Copy as text</b></button>
+      <button class="choice" id="shIcs" type="button"><span class="ico">📅</span><b>Calendar file</b></button>
+      <button class="choice" id="shLink" type="button"><span class="ico">🔗</span><b>Subscribe link</b></button>
+      <button class="choice" id="shNative" type="button"><span class="ico">📤</span><b>Share…</b></button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
 
 <script type="module" src="/app.js"></script>
 </body>

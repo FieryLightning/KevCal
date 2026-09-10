@@ -7,8 +7,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { db, id, nowISO, log, getSetting, setSetting, ORIGINALS_DIR, DATA_DIR, DEFAULT_LEAD_DAYS } from './db.js';
-import { extract, assessRisk } from './extract/index.js';
-import { aiAvailable } from './extract/anthropic.js';
+import { extract, assessRisk, readerAvailable, readerName, readerModel } from './extract/index.js';
 import { buildICS } from './lib/ics.js';
 import { diffItems, describeDiff } from './lib/diff.js';
 import { json, badRequest, notFound, readJSON, serveFile, fromBodyError } from './lib/http.js';
@@ -20,6 +19,7 @@ const ITEM_COLUMNS = [
   'status', 'satisfied', 'satisfied_at', 'lead_days', 'recurrence_suggestion',
   'recurrence_accepted', 'rrule', 'question', 'heading', 'src_page', 'src_bbox',
   'src_raw', 'src_interpretation', 'fingerprint', 'user_edited', 'derived_from',
+  'flags', 'blocked', 'date_basis',
 ];
 
 const EDITABLE = new Set([
@@ -31,7 +31,7 @@ const EDITABLE = new Set([
 // default, so supply it here for fields the extractor legitimately leaves unset.
 const COLUMN_DEFAULTS = {
   all_day: 1, confidence: 0.5, needs_review: 0, reviewed: 0, status: 'pending',
-  satisfied: 0, recurrence_accepted: 0, user_edited: 0,
+  satisfied: 0, recurrence_accepted: 0, user_edited: 0, blocked: 0,
 };
 
 function insertItems(batchId, items) {
@@ -45,6 +45,7 @@ function insertItems(batchId, items) {
     const itemId = id('i_');
     const values = ITEM_COLUMNS.map((c) => {
       let v = it[c];
+      if (c === 'flags' && Array.isArray(v)) v = JSON.stringify(v);
       if (typeof v === 'boolean') v = v ? 1 : 0;
       if (v === undefined || v === null) v = COLUMN_DEFAULTS[c] ?? null;
       return v;
@@ -56,7 +57,7 @@ function insertItems(batchId, items) {
 }
 
 function getItems(batchId) {
-  return db.prepare('SELECT * FROM items WHERE batch_id = ? ORDER BY needs_review DESC, confidence ASC, start_date ASC').all(batchId);
+  return db.prepare('SELECT * FROM items WHERE batch_id = ? ORDER BY blocked DESC, needs_review DESC, confidence ASC, start_date ASC').all(batchId);
 }
 
 function getBatch(batchId) {
@@ -88,6 +89,7 @@ function decorate(item) {
     human_time: item.start_time ? formatTime(item.start_time) + (item.end_time ? `–${formatTime(item.end_time)}` : '') : null,
     recurrence: item.recurrence_suggestion ? safeParse(item.recurrence_suggestion) : null,
     bbox: item.src_bbox ? safeParse(item.src_bbox) : null,
+    flags: item.flags ? (safeParse(item.flags) || []) : [],
   };
 }
 
@@ -98,23 +100,47 @@ function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
 export async function captureHandler(req, res) {
   let body;
   try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
+  const out = await captureCore(body);
+  return json(res, out.status, out.payload);
+}
+
+/**
+ * The iOS share-sheet entry point. A Shortcut posts the picture here straight
+ * from Photos or Mail and gets back one URL to open — which is the difference
+ * between capturing the letter in your hand and meaning to do it later.
+ */
+export async function quickCapture(req, res) {
+  let body;
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
+  const out = await captureCore(body);
+  if (out.status !== 200) return json(res, out.status, out.payload);
+  const items = out.payload.items || [];
+  return json(res, 200, {
+    ok: true,
+    batch: out.payload.batch.id,
+    found: items.length,
+    needs_check: items.filter((i) => i.needs_review).length,
+    url: `/?b=${out.payload.batch.id}`,
+  });
+}
+
+async function captureCore(body) {
+  const fail = (status, error) => ({ status, payload: { error } });
 
   const kind = body.kind === 'text' ? 'text' : (body.filename || '').toLowerCase().endsWith('.pdf') ? 'pdf' : 'image';
-  const reference = body.reference || today();
-  const useAI = body.useAI ?? getSetting('ai_enabled', false);
 
   let filePath = null;
   let storedName = null;
   if (kind !== 'text') {
-    if (!body.data) return badRequest(res, 'no image data supplied');
+    if (!body.data) return fail(400, 'no image data supplied');
     const b64 = String(body.data).replace(/^data:[^;]+;base64,/, '');
     const ext = kind === 'pdf' ? '.pdf' : path.extname(body.filename || '') || '.png';
     storedName = `${id('src_')}${ext}`;
     filePath = path.join(ORIGINALS_DIR, storedName);
     try { fs.writeFileSync(filePath, Buffer.from(b64, 'base64')); }
-    catch (e) { return badRequest(res, `could not save image: ${e.message}`); }
+    catch (e) { return fail(400, `could not save image: ${e.message}`); }
   } else if (!String(body.text || '').trim()) {
-    return badRequest(res, 'no text supplied');
+    return fail(400, 'no text supplied');
   }
 
   const anchor = body.anchorId
@@ -123,22 +149,30 @@ export async function captureHandler(req, res) {
 
   let result;
   try {
-    result = await extract({ kind, filePath, text: body.text, filename: body.filename, anchor, useAI, reference });
+    // The clock comes from the phone, not the server. "Tomorrow" and the
+    // after-midnight ambiguity are both questions about where the person
+    // holding the document is standing in their own day.
+    result = await extract({
+      kind, filePath, text: body.text, filename: body.filename, anchor,
+      now: body.now || body.reference, tz: body.tz || timezone(), takenAt: body.takenAt,
+    });
   } catch (e) {
-    return json(res, 500, { error: `extraction failed: ${e.message}` });
+    return fail(500, `extraction failed: ${e.message}`);
   }
 
   const batchId = id('b_');
-  const title = body.title || documentTitle(result, kind, body) || 'Capture';
+  const title = body.title || result.doc?.document_title || documentTitle(result, kind, body) || 'Capture';
 
   db.prepare(`
     INSERT INTO batches (id, title, source_kind, source_name, source_path, source_text,
-                         source_w, source_h, engine, status, risk, parent_id, anchor_json, created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                         source_w, source_h, engine, status, risk, parent_id, anchor_json, created_at,
+                         doc_date, tz, captured_at_local)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
   `).run(
     batchId, title, kind, body.filename ?? null, storedName, kind === 'text' ? body.text : null,
     result.page.width, result.page.height, result.engine, 'draft', result.risk,
     body.parentBatchId ?? null, result.anchor ? JSON.stringify(result.anchor) : null, nowISO(),
+    result.doc?.document_date ?? null, result.now?.tz ?? null, `${result.now.date} ${result.now.time}`,
   );
 
   insertItems(batchId, result.items);
@@ -154,19 +188,25 @@ export async function captureHandler(req, res) {
     diff = { ...d, description: describeDiff(d) };
   }
 
-  json(res, 200, {
-    batch: getBatch(batchId),
-    items,
-    risk: result.risk,
-    engine: result.engine,
-    stats: result.stats,
-    questions: result.questions,
-    anchor: result.anchor,
-    ocrError: result.ocrError,
-    aiError: result.aiError,
-    aiAvailable: result.aiAvailable,
-    diff,
-  });
+  return {
+    status: 200,
+    payload: {
+      batch: getBatch(batchId),
+      items,
+      risk: result.risk,
+      engine: result.engine,
+      doc: result.doc,
+      stats: result.stats,
+      questions: result.questions,
+      anchor: result.anchor,
+      now: result.now,
+      ocrError: result.ocrError,
+      readerError: result.readerError,
+      readerAvailable: result.readerAvailable,
+      usedReader: result.usedReader,
+      diff,
+    },
+  };
 }
 
 /**
@@ -227,7 +267,7 @@ export async function commitBatch(req, res, batchId) {
     : items.filter((i) => i.status !== 'rejected');
 
   // A low-confidence item cannot be committed until a human has touched it.
-  const blocked = chosen.filter((i) => i.needs_review && !i.reviewed && !body.force);
+  const blocked = chosen.filter((i) => i.blocked && !i.reviewed && !body.force);
   if (blocked.length) {
     return json(res, 409, {
       error: 'needs_review',
@@ -330,7 +370,7 @@ export async function applyDiff(req, res, batchId) {
       const src = get(a.newItemId);
       if (!isDonor(src)) { skipped++; continue; }
       // Same gate as a plain commit: uncertainty cannot slip in through the diff.
-      if (src.needs_review && !src.reviewed) { blocked++; continue; }
+      if (src.blocked && !src.reviewed) { blocked++; continue; }
       db.prepare("UPDATE items SET status='accepted', updated_at=? WHERE id=?").run(at, src.id);
       added++;
     } else if (a?.op === 'remove') {
@@ -382,6 +422,25 @@ const VALIDATORS = {
     ? JSON.stringify(v) : undefined),
 };
 
+/** Which flags an edit to a given field actually answers. */
+const FLAGS_ANSWERED_BY = {
+  start_date: ['no_date', 'impossible_date', 'year_assumed', 'weekday_mismatch', 'quote_mismatch',
+               'year_mismatch', 'in_the_past', 'far_future', 'midnight_ambiguity',
+               'relative_unresolved', 'relative_no_document_date', 'relative_photo_anchor',
+               'relative_ambiguous_phrase', 'low_confidence', 'reader_unsure'],
+  end_date: ['end_date_before_start'],
+  start_time: ['am_pm_assumed', 'end_before_start'],
+  end_time: ['am_pm_assumed', 'end_before_start'],
+  all_day: ['am_pm_assumed', 'end_before_start'],
+  title: ['low_confidence'],
+};
+
+export function pruneFlags(flags, editedFields) {
+  const answered = new Set();
+  for (const f of editedFields) for (const code of (FLAGS_ANSWERED_BY[f] || [])) answered.add(code);
+  return (Array.isArray(flags) ? flags : []).filter((f) => !answered.has(f?.code));
+}
+
 export async function patchItem(req, res, itemId) {
   const item = db.prepare('SELECT * FROM items WHERE id = ?').get(itemId);
   if (!item) return notFound(res, 'item not found');
@@ -409,9 +468,15 @@ export async function patchItem(req, res, itemId) {
     sets.push('satisfied_at = ?');
     vals.push(body.satisfied ? nowISO() : null);
   }
-  // A human touched it, so it is no longer blocking the commit.
-  sets.push('user_edited = 1', 'reviewed = 1', 'updated_at = ?');
-  vals.push(nowISO(), itemId);
+  // A human touched it, so it is no longer blocking the commit. The flags that
+  // prompted the edit are retired; any still true are kept, because clearing a
+  // warning the user did not actually address would be a quiet lie.
+  const remaining = pruneFlags(safeParse(item.flags) || [], Object.keys(body));
+  sets.push('user_edited = 1', 'reviewed = 1', 'flags = ?', 'blocked = ?', 'needs_review = ?', 'updated_at = ?');
+  vals.push(JSON.stringify(remaining),
+            remaining.some((f) => f.level === 'blocker') ? 1 : 0,
+            remaining.length ? 1 : 0,
+            nowISO(), itemId);
 
   db.prepare(`UPDATE items SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
   log('edit_item', { item_id: itemId, batch_id: item.batch_id, detail: Object.keys(body).join(',') });
@@ -436,7 +501,7 @@ export async function bulkItems(req, res) {
       affected = db.prepare(`UPDATE items SET status='rejected', reviewed=1, updated_at=? WHERE id IN (${marks})`).run(at, ...ids).changes;
       break;
     case 'review':
-      affected = db.prepare(`UPDATE items SET reviewed=1, updated_at=? WHERE id IN (${marks})`).run(at, ...ids).changes;
+      affected = db.prepare(`UPDATE items SET reviewed=1, blocked=0, updated_at=? WHERE id IN (${marks})`).run(at, ...ids).changes;
       break;
     case 'satisfy':
       affected = db.prepare(`UPDATE items SET satisfied=1, satisfied_at=?, updated_at=? WHERE id IN (${marks})`).run(at, at, ...ids).changes;
@@ -577,7 +642,7 @@ export function exportICS(req, res, url) {
   const items = itemsForExport({ batchId, itemIds }).filter((i) => i.start_date);
   const batch = batchId ? getBatch(batchId) : null;
   const name = batch ? `KevCal — ${batch.title}` : 'KevCal';
-  const ics = buildICS(items, { calName: name, leadDaysFor });
+  const ics = buildICS(items, { calName: name, leadDaysFor, tz: timezone() });
   const filename = `${(batch?.title || 'kevcal').replace(/[^\w-]+/g, '-').slice(0, 40)}.ics`;
   res.writeHead(200, {
     'content-type': 'text/calendar; charset=utf-8',
@@ -593,7 +658,7 @@ export async function openInCalendar(req, res) {
   const items = itemsForExport({ batchId: body.batchId, itemIds: body.itemIds }).filter((i) => i.start_date);
   if (!items.length) return badRequest(res, 'nothing to add');
   const batch = body.batchId ? getBatch(body.batchId) : null;
-  const ics = buildICS(items, { calName: `KevCal — ${batch?.title || 'items'}`, leadDaysFor });
+  const ics = buildICS(items, { calName: `KevCal — ${batch?.title || 'items'}`, leadDaysFor, tz: timezone() });
   const tmpDir = path.join(DATA_DIR, 'tmp');
   fs.mkdirSync(tmpDir, { recursive: true });
   const file = path.join(tmpDir, `kevcal-${Date.now()}.ics`);
@@ -658,7 +723,7 @@ export function serveShare(req, res, token, wantsICS) {
   const label = share.label || batch?.title || 'Shared dates';
 
   if (wantsICS) {
-    const ics = buildICS(items, { calName: label, leadDaysFor });
+    const ics = buildICS(items, { calName: label, leadDaysFor, tz: timezone() });
     res.writeHead(200, { 'content-type': 'text/calendar; charset=utf-8', 'cache-control': 'no-cache' });
     return res.end(ics);
   }
@@ -690,18 +755,30 @@ export function revokeShare(req, res, shareId) {
 export async function settingsHandler(req, res) {
   if (req.method === 'GET') {
     return json(res, 200, {
-      ai_enabled: getSetting('ai_enabled', false),
-      ai_available: aiAvailable(),
+      reader: readerAvailable() ? readerName() : 'on-device',
+      reader_available: readerAvailable(),
+      reader_model: readerModel(),
+      timezone: timezone(),
       lead_days: getSetting('lead_days', { deadline: DEFAULT_LEAD_DAYS.deadline, event: DEFAULT_LEAD_DAYS.event }),
       ladders: DEFAULT_LEAD_DAYS.ladders,
       data_dir: DATA_DIR,
+      keep_originals: getSetting('keep_originals', true),
     });
   }
   let body;
   try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
-  if ('ai_enabled' in body) setSetting('ai_enabled', Boolean(body.ai_enabled));
   if ('lead_days' in body) setSetting('lead_days', body.lead_days);
+  if ('timezone' in body) setSetting('timezone', String(body.timezone || '').slice(0, 64));
+  if ('keep_originals' in body) setSetting('keep_originals', Boolean(body.keep_originals));
   json(res, 200, { ok: true });
+}
+
+/** The zone every exported time is anchored to. */
+export function timezone() {
+  const saved = getSetting('timezone', null);
+  if (saved) return saved;
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; }
+  catch { return 'UTC'; }
 }
 
 export async function anchorsHandler(req, res) {
@@ -733,5 +810,5 @@ export function stats(req, res) {
       (SELECT COUNT(*) FROM items WHERE status='accepted') AS live_items,
       (SELECT COUNT(*) FROM items WHERE status='accepted' AND kind='deadline' AND satisfied=0) AS open_deadlines
   `).get();
-  json(res, 200, { ...row, ai_available: aiAvailable() });
+  json(res, 200, { ...row, reader_available: readerAvailable() });
 }

@@ -2,74 +2,113 @@
 
 Written so an interrupted session — or you tomorrow — can pick it up cold.
 
-## Status: working end to end
+## Status: v2 rebuilt and working end to end
 
-`npm start`, then capture a document. 66/66 end-to-end tests pass (`npm test`).
+`npm test` → **213 passing** (64 checker + 36 reader + 113 end-to-end). `npm start`, then capture.
+
+## What v2 changed, and why
+
+v1's weakness was never the plumbing — it was that a hand-rolled regex grammar
+was the *primary* reader, and it failed **confidently**. v2 keeps everything that
+worked and replaces the engine.
+
+| | v1 | v2 |
+|---|---|---|
+| Reader | Apple Vision + regex grammar | Gemini **or** OpenAI, one structured call, same contract |
+| Grammar | the extractor | demoted to **cross-checker** and offline fallback |
+| Relative dates | not handled | resolved in one place, against the phone's clock, always explained |
+| Uncertainty | a confidence number | named flags with one-tap alternatives |
+| Bad dates | silently "rescued" | reported, never rounded |
+| Times | floating, no zone | converted to a real instant in a named zone |
+| Reach | LAN only, Mac awake, same wifi | tunnel-ready with a token, plus an iOS share-sheet entry point |
+| Front end | desktop-shaped | phone-first, rebuilt |
 
 ## Done
 
-- [x] Four persona interviews + synthesis into 12 design rules (`research/`)
-- [x] On-device OCR with bounding boxes via Apple Vision (`tools/ocr.swift`)
-- [x] Deterministic date/time/deadline/recurrence grammar
-- [x] Table-row grouping (so a date keeps the title in the next column)
-- [x] Relative dates: `w/c 18 Nov`, `Wk 7 (Fri)` resolved against a term anchor,
-      including skipping non-teaching weeks; asked for when unresolvable
-- [x] Confidence scoring, risk assessment, review gating
-- [x] SQLite store with full provenance per item
-- [x] Batch = undo + diff + bulk edit + share, all one concept
-- [x] Re-import diffing, with hand-edited items protected from reversion
-- [x] Deadlines: escalating ladders, runway bar, satisfied state
-- [x] `.ics` export (RFC 5545 folding, alarms, exclusive all-day DTEND)
-- [x] Share: text, image card, `.ics`, subscribable feed with revocation
-- [x] Optional AI tier (off by default, no key needed)
-- [x] Front end: capture / dates / imports / settings, light + dark
-- [x] End-to-end test suite (82 tests)
+- [x] `extract/contract.js` — one provider-neutral reading contract: the system
+      prompt and the schema both readers are held to. Reports what is *printed*:
+      the words, the weekday as written, whether a year appeared, whether am/pm
+      was stated. Explicitly forbidden from doing date arithmetic.
+- [x] `extract/gemini.js` and `extract/openai.js` — transport only, picked by
+      `extract/reader.js` from whichever key is set (`KEVCAL_READER` to force).
+      Gemini leads when both are present, because it returns bounding boxes.
+      36 tests stub `fetch` and check the exact bytes each would send.
+- [x] `extract/verify.js` — the checker. Every calculation and every flag.
+- [x] Never guesses: impossible dates refused, missing years stated, relative
+      wording anchored to the document's own date where there is one
+- [x] The after-midnight rule: at 00:20 "tomorrow" is a blocking question with
+      both days offered
+- [x] Plausibility window: past and far-future dates flagged, never auto-shifted
+- [x] Cross-examination: weekday-vs-date, quote re-parse, printed-year check —
+      any disagreement blocks instead of being resolved
+- [x] Two flag levels: **blocker** (cannot reach a calendar) vs **check** (goes
+      through, but says so)
+- [x] Editing an item retires exactly the flags that edit answers
+- [x] `.ics` with real timezone conversion (the old floating-time bug is gone)
+- [x] Phone-first front end rebuilt: tab bar + capture FAB, scanner animation
+      with boxes landing on your photo, review with inline one-tap fixes,
+      bottom-sheet editor with the source crop, dark mode, home-screen icons
+- [x] `POST /api/quick` + Shortcuts recipe for share-sheet capture
+- [x] `KEVCAL_TOKEN` lock so it can sit behind a tunnel
+- [x] `KEVCAL_FAKE_READER` fixture harness — the whole pipeline is testable with
+      no API key and no network
+- [x] Repeated-title check: when a table's columns fail to line up, every row
+      ends up labelled with the page header. No per-item rule can see that, so it
+      is caught across the batch.
 
-## Not done (deliberate — see README "Not in this version")
+## Kept from v1, unchanged
 
-- [ ] Rota-grid row anchoring + shift-code dictionary
-- [ ] Deadline chains (`derived_from` column exists as the seam)
-- [ ] Live Google/Outlook OAuth sync
-- [ ] Service worker / offline queueing of photos taken away from the Mac
-- [ ] Screen-reader labelling is thin
+Batch = undo + diff + bulk edit + share. Provenance on every item. Review
+scaling with risk. Never inventing a recurrence. Re-import diffing with
+hand-edits protected. Deadline ladders and the *sorted* state. Sharing in four
+envelopes with revocation. The security hardening (cross-site checks, iCalendar
+injection refusal, path traversal, bounded shifts).
 
-## Reviewed and hardened
+## Bugs found and fixed while building this
 
-Two agents attacked the build: an adversarial QA pass and a UX review against the
-personas. Everything they found that mattered is fixed and covered by tests.
+- The item editor opened **behind** the review overlay (z-index 60 vs 70), so
+  tapping any card during a review showed nothing at all.
+- `mergeRangePairs` had been deleted by an interrupted edit in v1's working tree,
+  leaving `build.js` throwing on every capture.
+- `'\;'` in `ics.js` is just `';'` in JavaScript — the semicolon escape had been
+  reintroduced during the rewrite. Fixed and covered.
+- A quoted date range ("9–13 November") was flagged as a contradiction because
+  the grammar only parses its second date. It now agrees with either end.
+- Yearless dates flagged even when the letter dated itself; the document's own
+  date now supplies the year silently.
+- "3.30" was read as 03:30. Now read as the afternoon, said out loud, one tap to
+  flip.
 
-Worst bug found: **"Contract ends December 2031" invented 20 December 2025** at 94%
-confidence — the day pattern was eating the first two digits of the year. It also
-silently "rescued" impossible dates (29 February 2027 became 20 February 2026).
-That is precisely the confident-error failure the whole design exists to prevent.
+## What the real Caltech PDF says about the fallback
 
-Also fixed: a huge date shift could write NaN dates that then broke every calendar
-export; `apply-diff` accepted unreviewed items and could overwrite an unrelated
-batch; deleting a re-imported batch destroyed its image then failed on a foreign
-key; arbitrary iCalendar properties could be injected through a repeat rule; redo
-resurrected items the user had deliberately rejected; `;` was never escaped in
-.ics output (`'\\;'` is just `';'` in JavaScript); a share with no scope published
-the entire calendar; and any web page could POST to the server and switch on AI
-uploading. Contrast failures in dark mode (the primary button measured 2.38:1)
-and the missing fast path are fixed too.
+`samples/AcademicCalendar2026-27.pdf` is a genuine two-column academic calendar.
+Through the **on-device fallback** it produces 73 items and gives 27 of them the
+page header as their title, because the PDF's text layer puts the date column and
+the description column in separate blocks and row-grouping cannot recover the
+pairing. That is exactly the failure Gemini is there to fix — it sees the layout
+rather than the text stream — and it is why the header now names the engine that
+actually read each import. The repeated-title check means those 27 arrive flagged
+rather than silently.
 
 ## Known rough edges
 
-- Titles occasionally keep a stray word from a merged table row.
-- Screen-reader support is improved but still thin: the review list rebuilds on
-  every selection, which moves focus.
-- Timed events are exported as floating time with no TZID, so a shared .ics
-  shifts for a recipient in another timezone.
-- Real-world school PDFs will be messier than the synthetic fixtures.
+- The Gemini path has never been run against the live API — there is no key on
+  this machine. Every rule is covered by fixtures, but the first real call may
+  need the model name in `.env` adjusting; the code falls back down a chain.
+- Screen-reader support is better than v1 but still thin.
+- Rota grids remain out of scope.
+- `?tab=` and `?b=` deep links exist; there is no full router.
 
 ## To pick this up again
 
 ```bash
 cd ~/KevCal
-npm run build:tools   # only if bin/ is missing
-npm test              # confirms nothing regressed
+cp .env.example .env     # paste a Gemini key in
+npm run build:tools      # only if bin/ is missing
+npm test
 npm start
 ```
 
-Read in this order: `BRIEF.md` (why), `research/SYNTHESIS.md` (the rules),
-`DECISIONS.md` (what was chosen for you), then the code.
+Read in this order: `README.md` (what and how), `BRIEF.md` (why),
+`research/SYNTHESIS.md` (the rules), `DECISIONS.md`, then
+`server/extract/verify.js` — which is where the whole design actually lives.

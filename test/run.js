@@ -37,8 +37,25 @@ function captureImage(file, extra = {}) {
   return api('/api/capture', { method: 'POST', body: { kind: 'image', filename: file, data, reference: '2025-09-03', ...extra } });
 }
 
+// The reader is a paid network call, so the tests drive it from a fixture file
+// instead. Writing the file makes the next capture take the Gemini path with a
+// known answer; deleting it drops back to the on-device grammar. One server,
+// both engines, no key and no flakiness.
+const FIXTURE = path.join(ROOT, 'test/fixtures/reader.json');
+function reads(doc) { fs.mkdirSync(path.dirname(FIXTURE), { recursive: true }); fs.writeFileSync(FIXTURE, JSON.stringify(doc)); }
+function readsNothing() { try { fs.unlinkSync(FIXTURE); } catch { /* already gone */ } }
+readsNothing();
+
 const server = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], {
-  env: { ...process.env, KEVCAL_PORT: String(PORT), KEVCAL_DATA: TMP_DATA, KEVCAL_HOST: '127.0.0.1' },
+  env: {
+    ...process.env,
+    KEVCAL_PORT: String(PORT), KEVCAL_DATA: TMP_DATA, KEVCAL_HOST: '127.0.0.1',
+    KEVCAL_FAKE_READER: FIXTURE,
+    // Both cleared so a key in the developer's shell can never make the tests
+    // reach the network or change which reader is reported.
+    GEMINI_API_KEY: '',
+    OPENAI_API_KEY: '',
+  },
   stdio: ['ignore', 'ignore', 'pipe'],
 });
 let serverErr = '';
@@ -60,7 +77,8 @@ try {
   const health = await api('/api/health');
   check('server healthy', health.data.ok === true);
   check('on-device OCR available', health.data.ocr === true, 'run npm run build:tools');
-  check('AI is off by default', health.data.ai_enabled === false);
+  check('a timezone is always resolved', !!(await api('/api/settings')).data.timezone);
+  check('the reader in use is named', health.data.reader === 'fixture', health.data.reader);
 
   console.log('\ncapture: school letter (the flagship case)');
   const letter = await captureImage('school-letter.png');
@@ -92,7 +110,10 @@ try {
   check('an interpretation is recorded', items.length > 0 && items.every((i) => i.src_interpretation));
 
   console.log('\nR2/R4: review gating');
-  check('a bulky/uncertain import is high risk', letter.data.risk === 'high');
+  // 'blocked' is the stronger form of 'high': something in here cannot be answered
+  // by the machine at all, so the review is not merely advisable but compulsory.
+  check('a bulky/uncertain import demands review',
+    letter.data.risk === 'high' || letter.data.risk === 'blocked', letter.data.risk);
   const blocked = await api(`/api/batches/${letter.data.batch.id}/commit`, { method: 'POST' });
   check('commit blocked while an item needs review', blocked.status === 409, `got ${blocked.status}`);
   check('block names the offending item', (blocked.data.blocked || []).length >= 1);
@@ -239,16 +260,16 @@ try {
   });
   check('malformed JSON rejected cleanly', badJson.status === 400);
   const csrfForm = await fetch(`${BASE}/api/settings`, {
-    method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{"ai_enabled":true}',
+    method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{"timezone":"Evil/Place"}',
   });
   check('cross-site style POST refused', csrfForm.status === 415, String(csrfForm.status));
   const csrfOrigin = await fetch(`${BASE}/api/settings`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', origin: 'http://evil.example' },
-    body: JSON.stringify({ ai_enabled: true }),
+    body: JSON.stringify({ timezone: 'Evil/Place' }),
   });
   check('foreign Origin refused', csrfOrigin.status === 403, String(csrfOrigin.status));
-  check('privacy switch untouched', (await api('/api/settings')).data.ai_enabled === false);
+  check('settings untouched by either', (await api('/api/settings')).data.timezone !== 'Evil/Place');
 
   const invented = await api('/api/capture', { method: 'POST', body: {
     kind: 'text', reference: '2025-09-03', text: 'Contract ends December 2031',
@@ -288,6 +309,148 @@ try {
 
   const missing = await api('/api/batches/does-not-exist');
   check('unknown batch 404s', missing.status === 404);
+
+  // ────────────────────────────────────────────────────────────────────
+  //  v2: the reader reads, the checker decides, and nothing is guessed.
+  // ────────────────────────────────────────────────────────────────────
+
+  console.log('\nv2: a clean read goes straight through');
+  reads({
+    document_title: 'Netherfield Primary',
+    items: [{
+      title: 'Parents evening', kind: 'event', start_date: '2027-03-11',
+      has_explicit_year: true, weekday_stated: 'Thursday',
+      start_time: '16:30', end_time: '19:30', am_pm_stated: true,
+      confidence: 0.96, source_quote: 'Parents evening — Thursday 11 March 2027, 4.30pm to 7.30pm',
+      box_2d: [120, 80, 160, 700],
+    }],
+  });
+  const clean = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', text: 'anything', now: '2026-09-10T14:30', tz: 'Europe/London',
+  } });
+  check('the fixture reader was used', /fixture/.test(clean.data.engine), clean.data.engine);
+  check('a clean item raises no flags', (clean.data.items[0].flags || []).length === 0,
+    JSON.stringify(clean.data.items[0].flags));
+  check('and takes the three-tap path', clean.data.risk === 'low', clean.data.risk);
+  check('the batch is named from the document', clean.data.batch.title === 'Netherfield Primary');
+  check('the model box became a bounding box', Array.isArray(clean.data.items[0].bbox));
+  const cleanCommit = await api(`/api/batches/${clean.data.batch.id}/commit`, { method: 'POST' });
+  check('it commits with no review at all', cleanCommit.status === 200, cleanCommit.text.slice(0, 120));
+
+  console.log('\nv2: "tomorrow" just after midnight is asked about, not assumed');
+  reads({ items: [{
+    title: 'School trip', kind: 'event', start_date: null,
+    relative_phrase: 'tomorrow', relative_kind: 'tomorrow',
+    has_explicit_year: false, am_pm_stated: true, confidence: 0.95,
+    source_quote: 'The trip leaves tomorrow at 8am', start_time: '08:00',
+  }] });
+  const midnight = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', text: 'anything', now: '2026-09-10T00:20', tz: 'Europe/London',
+  } });
+  const trip = midnight.data.items[0];
+  const midFlag = (trip.flags || []).find((f) => f.code === 'midnight_ambiguity');
+  check('the small-hours ambiguity is raised', !!midFlag, JSON.stringify((trip.flags || []).map((f) => f.code)));
+  check('it is a blocker', midFlag?.level === 'blocker');
+  check('both days are offered as one tap', midFlag?.options?.length === 2);
+  check('the batch is marked blocked', midnight.data.risk === 'blocked', midnight.data.risk);
+
+  const blockedCommit = await api(`/api/batches/${midnight.data.batch.id}/commit`, { method: 'POST' });
+  check('it cannot reach the calendar unanswered', blockedCommit.status === 409, String(blockedCommit.status));
+
+  const chosen = midFlag.options[1];
+  const answered = await api(`/api/items/${trip.id}`, { method: 'PATCH', body: chosen.patch });
+  check('answering it sets the date', answered.data.item.start_date === chosen.patch.start_date);
+  check('and retires the flag that asked', (answered.data.item.flags || []).every((f) => f.code !== 'midnight_ambiguity'),
+    JSON.stringify(answered.data.item.flags));
+  check('and unblocks the item', answered.data.item.blocked === 0);
+  const nowCommits = await api(`/api/batches/${midnight.data.batch.id}/commit`, { method: 'POST' });
+  check('now it commits', nowCommits.status === 200, nowCommits.text.slice(0, 120));
+
+  console.log('\nv2: a document that dates itself needs no question');
+  reads({ document_date: '2026-09-09', items: [{
+    title: 'Sports day', kind: 'event', start_date: null,
+    relative_phrase: 'tomorrow', relative_kind: 'tomorrow',
+    has_explicit_year: false, am_pm_stated: true, confidence: 0.9,
+    source_quote: 'Sports day is tomorrow',
+  }] });
+  const anchored = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', text: 'anything', now: '2026-09-10T00:20', tz: 'Europe/London',
+  } });
+  check('it counts from the letter, not the clock', anchored.data.items[0].start_date === '2026-09-10',
+    anchored.data.items[0].start_date);
+  check('so nothing blocks', anchored.data.items[0].blocked === 0);
+  check('and the reasoning is shown', /9 September/.test(anchored.data.items[0].src_interpretation || ''),
+    anchored.data.items[0].src_interpretation);
+
+  console.log('\nv2: the reader is cross-examined');
+  reads({ items: [{
+    title: 'Contract end', kind: 'deadline', start_date: '2025-12-20',
+    has_explicit_year: true, am_pm_stated: true, confidence: 0.94,
+    source_quote: 'Contract ends December 2031',
+  }] });
+  const caught = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', text: 'anything', now: '2026-09-10T10:00', tz: 'Europe/London',
+  } });
+  const codes = (caught.data.items[0].flags || []).map((f) => f.code);
+  check('a confident wrong year is caught', codes.includes('year_mismatch'), JSON.stringify(codes));
+  check('and blocked at 94% confidence', caught.data.items[0].blocked === 1);
+  await api(`/api/batches/${caught.data.batch.id}`, { method: 'DELETE' });
+
+  reads({ items: [{
+    title: 'Assembly', kind: 'event', start_date: '2027-03-12', weekday_stated: 'Thursday',
+    has_explicit_year: true, am_pm_stated: true, confidence: 0.9,
+    source_quote: 'Assembly on Thursday 12 March 2027',
+  }] });
+  const wrongDay = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', text: 'anything', now: '2026-09-10T10:00', tz: 'Europe/London',
+  } });
+  const dayFlag = (wrongDay.data.items[0].flags || []).find((f) => f.code === 'weekday_mismatch');
+  check('a weekday that contradicts the date is caught', !!dayFlag);
+  check('and the Thursday is offered', dayFlag?.options?.[0]?.patch.start_date === '2027-03-11',
+    JSON.stringify(dayFlag?.options?.map((o) => o.patch.start_date)));
+  await api(`/api/batches/${wrongDay.data.batch.id}`, { method: 'DELETE' });
+
+  console.log('\nv2: times carry a real timezone into the calendar');
+  await api('/api/settings', { method: 'POST', body: { timezone: 'Europe/London' } });
+  const tzIcs = await (await fetch(`${BASE}/api/export.ics?batch=${clean.data.batch.id}`)).text();
+  check('a timed event is written as a real instant', /DTSTART:20270311T163000Z/.test(tzIcs),
+    tzIcs.split('\r\n').find((l) => l.startsWith('DTSTART')));
+  check('the calendar names its zone', /X-WR-TIMEZONE:Europe\/London/.test(tzIcs));
+
+  console.log('\nv2: the share-sheet entry point');
+  reads({ items: [{
+    title: 'Dentist', kind: 'event', start_date: '2027-01-14', has_explicit_year: true,
+    am_pm_stated: true, confidence: 0.9, source_quote: 'Dentist 14 January 2027',
+  }] });
+  const quick = await api('/api/quick', { method: 'POST', body: {
+    kind: 'text', text: 'anything', now: '2026-09-10T10:00',
+  } });
+  check('quick capture returns one URL to open', /^\/\?b=b_/.test(quick.data.url || ''), quick.data.url);
+  check('and says what it found', quick.data.found === 1 && quick.data.needs_check === 0,
+    JSON.stringify(quick.data));
+
+  console.log('\nv2: a table whose columns did not line up is caught');
+  reads({ items: [1, 2, 3, 4, 5].map((n) => ({
+    title: 'CALIFORNIA INSTITUTE OF TECHNOLOGY', kind: 'event',
+    start_date: `2027-0${n}-1${n}`, has_explicit_year: true, am_pm_stated: true,
+    confidence: 0.9, source_quote: `row ${n}`,
+  })) });
+  const columns = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', text: 'anything', now: '2026-09-10T10:00',
+  } });
+  check('every row of a mis-aligned table is flagged',
+    columns.data.items.every((i) => (i.flags || []).some((f) => f.code === 'repeated_title')),
+    JSON.stringify(columns.data.items.map((i) => (i.flags || []).map((f) => f.code))));
+  check('but it does not block — the dates may still be right',
+    columns.data.items.every((i) => i.blocked === 0));
+  await api(`/api/batches/${columns.data.batch.id}`, { method: 'DELETE' });
+
+  readsNothing();
+  const fellBack = await api('/api/capture', { method: 'POST', body: {
+    kind: 'text', text: 'Dentist on 4 November 2027', now: '2026-09-10T10:00',
+  } });
+  check('with the reader unavailable it still works', fellBack.data.items.length === 1, fellBack.data.engine);
+  check('and says which engine actually read it', /grammar/.test(fellBack.data.engine), fellBack.data.engine);
 } catch (e) {
   failed++;
   failures.push(`harness: ${e.message}`);
@@ -295,6 +458,7 @@ try {
   if (serverErr) console.error('--- server stderr ---\n' + serverErr.split('\n').filter(l=>!/Experimental|trace-warnings/.test(l)).join('\n'));
 } finally {
   server.kill();
+  readsNothing();
   try { fs.rmSync(TMP_DATA, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 

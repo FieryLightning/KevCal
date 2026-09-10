@@ -4,3 +4,4 @@ bin/
 .env
 .DS_Store
 *.log
+test/fixtures/reader.json

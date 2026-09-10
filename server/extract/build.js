@@ -148,6 +148,7 @@ export function buildItems(rawLines, opts = {}) {
         heading: heading || null,
         deadline_marker: dl.marker,
         _hasYear: extra.hasYear !== false,
+        _endHasYear: extra.endHasYear !== false,
         ...partial,
       };
       item.fingerprint = fingerprint(item);
@@ -198,6 +199,7 @@ export function buildItems(rawLines, opts = {}) {
           src_interpretation: interp + (t ? ` at ${t.raw}` : ''),
         }, [...localSpans, ...localTimes], {
           specificity: first.specificity, hasYear: first.hasYear,
+          endHasYear: e.parts[1] ? e.parts[1].hasYear : true,
           ambiguousOrder: first.ambiguousOrder,
           multipleUnjoined: entries.length > 1 && !e.endDate,
         }, segText, localRec);
@@ -281,7 +283,7 @@ export function buildItems(rawLines, opts = {}) {
     if (!dates.length && !weekRefs.length && text.length > 3 && text.length < 90) prevPlainText = text;
   });
 
-  resolveYearsFromContext(items);
+  resolveYears(items, lines, reference);
 
   // Same title + same date twice in one document is a duplicate, not two events.
   const seen = new Map();
@@ -299,7 +301,7 @@ export function buildItems(rawLines, opts = {}) {
     seen.set(key, it);
     deduped.push(it);
   }
-  deduped.forEach((i) => { delete i._hasYear; });
+  deduped.forEach((i) => { delete i._hasYear; delete i._endHasYear; });
 
   return {
     items: deduped,
@@ -316,12 +318,25 @@ export function buildItems(rawLines, opts = {}) {
 }
 
 /**
- * A date written without a year belongs to the document it sits in, not to
- * today's calendar. "RSVP by 10 October" on a poster for an event on 15 October
- * 2025 means 2025 — inferring 2026 from today's date puts the deadline five days
- * AFTER the thing it is a deadline for. So snap yearless dates to the nearest
- * date in the same document that stated its year outright.
+ * Work out the year for dates that did not state one.
+ *
+ * Two rules, in order of confidence:
+ *
+ *  1. If the document labels its own span ("Academic Calendar 2026-2027"),
+ *     believe it. The month the span starts in is the month of its first date,
+ *     so anything from that month onwards is the first year and anything
+ *     before it is the second. This is what makes a school calendar work.
+ *
+ *  2. Otherwise assume the document runs forwards in time, and roll the year
+ *     over when the dates would otherwise go backwards — with enough slack
+ *     that a poster listing "RSVP by 10 October" after a 15 October event
+ *     stays in the same year rather than jumping forward one.
  */
+const SPLIT_YEAR_RE = /\b(20\d{2})\s*[-/–—]\s*(20\d{2}|\d{2})\b/;
+
+// How far a date may sit before the one preceding it before we call it a new year.
+const BACKWARDS_SLACK_DAYS = 75;
+
 /**
  * Collapse "16 February 2026 to 20 February 2026" into one dated entry, even
  * when it sits among other dates on the same line.
@@ -349,38 +364,101 @@ function mergeRangePairs(text, dates) {
   return entries;
 }
 
-function resolveYearsFromContext(items) {
-  const anchored = items.filter((i) => i._hasYear && i.start_date);
-  if (!anchored.length) return;
+export function detectSpanYears(lines) {
+  for (const line of lines) {
+    const m = String(line.text || '').match(SPLIT_YEAR_RE);
+    if (!m) continue;
+    const start = Number(m[1]);
+    const end = m[2].length === 2
+      ? Math.floor(start / 100) * 100 + Number(m[2])
+      : Number(m[2]);
+    if (end === start + 1) return { start, end };
+  }
+  return null;
+}
 
-  for (const item of items) {
-    if (item._hasYear || !item.start_date) continue;
+function yearFor(isoStr, year) {
+  const [, m, d] = isoStr.split('-').map(Number);
+  return isValidYMD(year, m, d) ? iso(year, m, d) : null;
+}
 
-    // Nearest anchored item by position in the document.
-    let nearest = null;
-    let bestDistance = Infinity;
-    for (const a of anchored) {
-      const d = Math.abs((a.src_line ?? 0) - (item.src_line ?? 0));
-      if (d < bestDistance) { bestDistance = d; nearest = a; }
+/** The first candidate that is not unreasonably far behind the running cursor. */
+function rollForward(isoStr, cursor) {
+  if (!cursor) return isoStr;
+  const cursorYear = Number(cursor.slice(0, 4));
+  const candidates = [cursorYear - 1, cursorYear, cursorYear + 1]
+    .map((y) => yearFor(isoStr, y))
+    .filter(Boolean)
+    .sort();
+  const forward = candidates.filter((c) => daysBetween(cursor, c) >= -BACKWARDS_SLACK_DAYS);
+  if (forward.length) return forward[0];
+  let best = isoStr, bestGap = Infinity;
+  for (const c of candidates) {
+    const gap = Math.abs(daysBetween(cursor, c));
+    if (gap < bestGap) { bestGap = gap; best = c; }
+  }
+  return best;
+}
+
+function note(item, why) {
+  const existing = item.src_interpretation ? `${item.src_interpretation} — ` : '';
+  item.src_interpretation = `${existing}${why}`;
+}
+
+export function resolveYears(items, lines, reference) {
+  const dated = [...items]
+    .filter((i) => i.start_date)
+    .sort((a, b) => (a.src_line ?? 0) - (b.src_line ?? 0));
+  if (!dated.length) return;
+
+  const span = detectSpanYears(lines);
+
+  if (span) {
+    const splitMonth = Number(dated[0].start_date.slice(5, 7));
+    for (const item of dated) {
+      if (!item._hasYear) {
+        const month = Number(item.start_date.slice(5, 7));
+        const year = month >= splitMonth ? span.start : span.end;
+        const next = yearFor(item.start_date, year);
+        if (next && next !== item.start_date) {
+          item.start_date = next;
+          note(item, `year taken as ${year} from the ${span.start}-${span.end} calendar`);
+        }
+      }
+      if (item.end_date && !item._endHasYear) {
+        const month = Number(item.end_date.slice(5, 7));
+        const year = month >= splitMonth ? span.start : span.end;
+        const next = yearFor(item.end_date, year);
+        if (next) item.end_date = next;
+      }
     }
-    if (!nearest || bestDistance > 12) continue;
-
-    const [, month, day] = item.start_date.split('-').map(Number);
-    const anchorYear = Number(nearest.start_date.slice(0, 4));
-    let best = item.start_date;
-    let bestGap = Infinity;
-    for (const y of [anchorYear - 1, anchorYear, anchorYear + 1]) {
-      if (!isValidYMD(y, month, day)) continue;
-      const candidate = iso(y, month, day);
-      const gap = Math.abs(daysBetween(nearest.start_date, candidate));
-      if (gap < bestGap) { bestGap = gap; best = candidate; }
+  } else {
+    let cursor = null;
+    for (const item of dated) {
+      if (item._hasYear) {
+        cursor = item.start_date;
+      } else {
+        const next = rollForward(item.start_date, cursor);
+        if (next !== item.start_date) {
+          note(item, `year taken as ${next.slice(0, 4)} to keep the document in order`);
+          item.start_date = next;
+        }
+        cursor = item.start_date;
+      }
+      if (item.end_date && !item._endHasYear) {
+        item.end_date = rollForward(item.end_date, item.start_date);
+      }
+      if (item.end_date) cursor = item.end_date;
     }
+  }
 
-    if (best !== item.start_date) {
-      item.src_interpretation = `${item.src_interpretation || ''} — year taken as ${best.slice(0, 4)} from “${nearest.title}” elsewhere in the document`.trim();
-      item.start_date = best;
-      item.fingerprint = fingerprint(item);
+  // A range that now ends before it starts crossed a year boundary.
+  for (const item of dated) {
+    if (item.end_date && item.end_date < item.start_date) {
+      const bumped = yearFor(item.end_date, Number(item.end_date.slice(0, 4)) + 1);
+      if (bumped) item.end_date = bumped;
     }
+    item.fingerprint = fingerprint(item);
   }
 }
 

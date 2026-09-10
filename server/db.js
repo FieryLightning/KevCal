@@ -122,6 +122,14 @@ function addColumn(table, definition, name) {
   if (!cols.includes(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`);
 }
 addColumn('items', 'undo_marked INTEGER NOT NULL DEFAULT 0', 'undo_marked');
+// v2: the checker's findings travel with the item, so the UI can show exactly
+// what was assumed and offer the alternative reading as a button.
+addColumn('items', 'flags TEXT', 'flags');
+addColumn('items', 'blocked INTEGER NOT NULL DEFAULT 0', 'blocked');
+addColumn('items', 'date_basis TEXT', 'date_basis');
+addColumn('batches', 'doc_date TEXT', 'doc_date');
+addColumn('batches', 'tz TEXT', 'tz');
+addColumn('batches', 'captured_at_local TEXT', 'captured_at_local');
 
 export function nowISO() { return new Date().toISOString(); }
 

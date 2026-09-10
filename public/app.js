@@ -1,20 +1,101 @@
-// KevCal front end. No framework, no build step.
+// KevCal front end. No framework, no build step — the whole app is this file,
+// one stylesheet and one HTML shell, served straight off disk.
+//
+// The shape of it follows one rule from the research: you should never have to
+// reopen the original document to trust what came out. So every uncertain item
+// carries its own explanation, its own alternatives, and a tap through to the
+// exact place on the page it was read from.
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const state = {
-  view: 'capture',
-  batch: null,
+  view: 'dates',
+  health: {},
+  settings: {},
+  batch: null,          // the import currently under review
   items: [],
-  sel: new Set(),
-  settings: null,
-  lastCommit: null,
-  focusId: null,
+  scanTimer: null,
+  shareCtx: null,
 };
 
-const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+// ───────────────────────────────────────────────────────── small helpers
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+function pad(n) { return String(n).padStart(2, '0'); }
+
+/** The phone's own wall clock, which is the only clock "tomorrow" means anything against. */
+function localNow() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function localDateOf(ms) {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function timezone() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch { return ''; }
+}
+function todayISO() { return localNow().slice(0, 10); }
+
+function parseISO(s) { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); }
+function daysFromToday(iso) {
+  return Math.round((parseISO(iso) - parseISO(todayISO())) / 86400000);
+}
+
+function dayChip(item) {
+  if (!item.start_date) return `<div class="daychip none"><div class="m">?</div><div class="d">–</div><div class="w">no date</div></div>`;
+  const d = parseISO(item.start_date);
+  const cls = item.kind === 'deadline' ? 'daychip due' : 'daychip';
+  return `<div class="${cls}"><div class="m">${MONTHS[d.getMonth()]}</div><div class="d">${d.getDate()}</div><div class="w">${DAYS[d.getDay()]}</div></div>`;
+}
+
+function whenLabel(iso) {
+  if (!iso) return 'No date yet';
+  const n = daysFromToday(iso);
+  if (n === 0) return 'Today';
+  if (n === 1) return 'Tomorrow';
+  if (n === -1) return 'Yesterday';
+  if (n > 1 && n < 7) return `In ${n} days`;
+  if (n < -1 && n > -14) return `${Math.abs(n)} days ago`;
+  const d = parseISO(iso);
+  const y = d.getFullYear() !== new Date().getFullYear() ? ` ${d.getFullYear()}` : '';
+  return `${DAYS[d.getDay()]} ${d.getDate()} ${MONTHS[d.getMonth()]}${y}`;
+}
+
+function timeLabel(item) {
+  if (!item.start_time) return '';
+  const fmt = (t) => {
+    const [h, m] = t.split(':').map(Number);
+    const ap = h < 12 ? 'am' : 'pm';
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    return m ? `${h12}:${pad(m)}${ap}` : `${h12}${ap}`;
+  };
+  return item.end_time ? `${fmt(item.start_time)}–${fmt(item.end_time)}` : fmt(item.start_time);
+}
+
+function haptic(ms = 8) { try { navigator.vibrate?.(ms); } catch { /* not everywhere */ } }
+
+let toastTimer = null;
+function toast(msg, action = null) {
+  const t = $('#toast');
+  t.innerHTML = `<span>${esc(msg)}</span>`;
+  if (action) {
+    const b = document.createElement('button');
+    b.textContent = action.label;
+    b.onclick = () => { t.hidden = true; action.run(); };
+    t.append(b);
+  }
+  t.hidden = false;
+  $('#live').textContent = msg;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, action ? 7000 : 3200);
+}
 
 async function api(path, { method = 'GET', body } = {}) {
   const res = await fetch(path, {
@@ -24,783 +105,766 @@ async function api(path, { method = 'GET', body } = {}) {
   });
   const text = await res.text();
   let data = {};
-  try { data = text ? JSON.parse(text) : {}; } catch { data = { raw: text }; }
-  if (!res.ok) { const e = new Error(data.error || res.statusText); e.status = res.status; e.data = data; throw e; }
+  try { data = text ? JSON.parse(text) : {}; } catch { data = { error: text.slice(0, 200) }; }
+  if (!res.ok) data.__status = res.status;
   return data;
 }
 
-// ------------------------------------------------------------------ toast
+function openOverlay(el) { el.hidden = false; document.body.classList.add('locked'); }
+function closeOverlay(el) { el.hidden = true; if (!$$('.overlay:not([hidden]), .sheet-wrap:not([hidden])').length) document.body.classList.remove('locked'); }
 
-let toastTimer = null;
-function toast(message, actionLabel, onAction, ms = 7000) {
-  $('.toast')?.remove();
-  clearTimeout(toastTimer);
-  const el = document.createElement('div');
-  el.className = 'toast';
-  el.innerHTML = `<span>${esc(message)}</span>`;
-  if (actionLabel) {
-    const b = document.createElement('button');
-    b.textContent = actionLabel;
-    b.onclick = () => { el.remove(); onAction?.(); };
-    el.appendChild(b);
-  }
-  document.body.appendChild(el);
-  const live = $('#liveRegion');
-  if (live) live.textContent = message;
-  toastTimer = setTimeout(() => el.remove(), ms);
-}
+// ───────────────────────────────────────────────────────── navigation
 
-// ------------------------------------------------------------------ tabs
-
-function show(view) {
+function go(view) {
   state.view = view;
-  $$('nav.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.view === view)));
-  $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${view}`));
-  if (view === 'dates') loadAgenda();
+  $$('.view').forEach((v) => v.classList.toggle('show', v.dataset.view === view));
+  $$('.tab').forEach((t) => t.classList.toggle('on', t.dataset.go === view));
+  window.scrollTo({ top: 0 });
+  if (view === 'dates') loadDates();
   if (view === 'imports') loadImports();
+  if (view === 'shared') loadShares();
   if (view === 'settings') loadSettings();
-  window.scrollTo({ top: 0, behavior: 'instant' });
 }
-$$('nav.tabs button').forEach((b) => b.onclick = () => show(b.dataset.view));
 
-// ------------------------------------------------------------------ capture
+$$('.tab').forEach((t) => t.addEventListener('click', () => { haptic(); go(t.dataset.go); }));
 
-function fileToBase64(file) {
+// ───────────────────────────────────────────────────────── dates view
+
+async function loadDates() {
+  const list = $('#datesList');
+  const { items = [] } = await api('/api/agenda');
+  const live = items.filter((i) => i.status === 'accepted');
+
+  const upcoming = live.filter((i) => i.start_date && daysFromToday(i.start_date) >= 0);
+  const past = live.filter((i) => i.start_date && daysFromToday(i.start_date) < 0);
+  const undated = live.filter((i) => !i.start_date);
+  const flagged = live.filter((i) => (i.flags || []).length);
+
+  const openDeadlines = upcoming.filter((i) => i.kind === 'deadline' && !i.satisfied).length;
+  $('#datesHeadline').textContent = upcoming.length ? 'Your dates' : 'Nothing yet';
+  $('#datesSub').textContent = upcoming.length
+    ? [`${upcoming.length} coming up`,
+       openDeadlines ? `${openDeadlines} deadline${openDeadlines === 1 ? '' : 's'}` : null,
+       flagged.length ? `${flagged.length} worth a check` : null].filter(Boolean).join(' · ')
+    : 'Tap the camera and point it at something with a date on it.';
+
+  if (!live.length) {
+    list.innerHTML = `<div class="empty"><span class="g">📸</span><b>No dates yet</b>
+      A school letter, a poster, a timetable, an appointment card — anything.</div>`;
+    return;
+  }
+
+  const groups = [];
+  if (undated.length) groups.push(['Needs a date', undated]);
+  if (upcoming.length) {
+    const soon = upcoming.filter((i) => daysFromToday(i.start_date) <= 7);
+    const later = upcoming.filter((i) => daysFromToday(i.start_date) > 7);
+    if (soon.length) groups.push(['This week', soon]);
+    if (later.length) groups.push(['Later', later]);
+  }
+  if (past.length) groups.push(['Gone by', past.slice(-12).reverse()]);
+
+  list.innerHTML = groups.map(([label, rows]) => `
+    <div class="section-label">${label}</div>
+    ${rows.map((i, n) => itemCard(i, { delay: n, past: label === 'Gone by' })).join('')}
+  `).join('');
+  wireItemCards(list, live);
+}
+
+function itemCard(item, { delay = 0, past = false, showFlags = false } = {}) {
+  const flags = item.flags || [];
+  const worst = flags.some((f) => f.level === 'blocker') ? 'stop' : (flags.length ? 'warn' : '');
+  const meta = [
+    whenLabel(item.start_date),
+    timeLabel(item),
+    item.location,
+    item.kind === 'deadline' ? '<span class="kindtag">DUE</span>' : '',
+  ].filter(Boolean);
+
+  const tags = [];
+  if (item.satisfied) tags.push('<span class="tag ok">✓ sorted</span>');
+  if (item.recurrence?.phrase && !item.recurrence_accepted) {
+    tags.push(`<span class="tag">repeats? “${esc(item.recurrence.phrase)}”</span>`);
+  }
+  if (item.cost) tags.push(`<span class="tag">${esc(item.cost)}</span>`);
+  if (item.owner) tags.push(`<span class="tag">${esc(item.owner)}</span>`);
+
+  let runway = '';
+  if (item.kind === 'deadline' && item.runway != null && !item.satisfied && item.runway > 0) {
+    runway = `<div class="runway"><i style="width:${Math.round(item.runway * 100)}%"></i></div>`;
+  }
+
+  return `
+  <div class="item ${worst} ${past ? 'gone' : ''}" role="button" tabindex="0"
+       data-id="${item.id}" style="animation-delay:${Math.min(delay * 45, 400)}ms">
+    ${dayChip(item)}
+    <div class="item-main">
+      <div class="item-title">${esc(item.title)}</div>
+      <div class="item-meta">${meta.map((m) => `<span>${m}</span>`).join('')}</div>
+      ${tags.length ? `<div class="tags">${tags.join('')}</div>` : ''}
+      ${runway}
+      ${showFlags ? flags.map((f) => flagBlock(item, f)).join('') : ''}
+    </div>
+  </div>`;
+}
+
+function flagBlock(item, f) {
+  const stop = f.level === 'blocker';
+  const opts = (f.options || []).map((o, n) => `
+    <button class="opt" data-opt="${n}" data-flag="${esc(f.code)}" data-item="${item.id}" type="button">${esc(o.label)}</button>
+  `).join('');
+  // A blocker with no alternatives to offer still needs an obvious next move.
+  // For something with no date at all that is "give it one", not "carry on".
+  let keep = '';
+  if (stop && !(f.options || []).length) {
+    keep = item.start_date
+      ? `<button class="opt" data-keep="${item.id}" type="button">Keep it as it is</button>`
+      : `<button class="opt pick" data-pick="${item.id}" type="button">Pick a date</button>
+         <button class="opt" data-drop="${item.id}" type="button">Drop it</button>`;
+  }
+  return `<div class="flag ${stop ? 'stop' : ''}">
+    <b>${stop ? 'Needs your answer' : 'Worth a check'}</b>
+    ${esc(f.message)}
+    ${opts || keep ? `<div class="opts">${opts}${keep}</div>` : ''}
+  </div>`;
+}
+
+function wireItemCards(root, pool) {
+  $$('.item', root).forEach((card) => {
+    const item = pool.find((i) => i.id === card.dataset.id);
+    if (!item) return;
+    const open = (e) => {
+      if (e.target.closest('.opt')) return;
+      haptic(); openEditor(item);
+    };
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(e); } });
+  });
+
+  $$('.opt[data-opt]', root).forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const item = pool.find((i) => i.id === btn.dataset.item);
+      const f = (item?.flags || []).find((x) => x.code === btn.dataset.flag);
+      const opt = f?.options?.[Number(btn.dataset.opt)];
+      if (!opt) return;
+      haptic(12);
+      btn.classList.add('pick');
+      const res = await api(`/api/items/${item.id}`, { method: 'PATCH', body: opt.patch });
+      if (res.error) return toast(res.error);
+      await refreshCurrent();
+    });
+  });
+
+  $$('.opt[data-pick]', root).forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      haptic();
+      const item = pool.find((i) => i.id === btn.dataset.pick);
+      if (item) openEditor(item);
+    });
+  });
+
+  $$('.opt[data-drop]', root).forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      haptic(12);
+      await api('/api/items/bulk', { method: 'POST', body: { op: 'reject', ids: [btn.dataset.drop] } });
+      await refreshCurrent();
+    });
+  });
+
+  $$('.opt[data-keep]', root).forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      haptic(12);
+      await api('/api/items/bulk', { method: 'POST', body: { op: 'review', ids: [btn.dataset.keep] } });
+      await refreshCurrent();
+    });
+  });
+}
+
+async function refreshCurrent() {
+  if (!$('#review').hidden && state.batch) return reloadReview();
+  if (state.view === 'dates') return loadDates();
+}
+
+// ───────────────────────────────────────────────────────── capture
+
+$('#btnCapture').addEventListener('click', () => { haptic(); openOverlay($('#chooser')); });
+$('#pickCamera').addEventListener('click', () => { closeOverlay($('#chooser')); $('#fileCamera').click(); });
+$('#pickLibrary').addEventListener('click', () => { closeOverlay($('#chooser')); $('#fileLibrary').click(); });
+$('#pickFile').addEventListener('click', () => { closeOverlay($('#chooser')); $('#filePicker').click(); });
+$('#pickText').addEventListener('click', () => { closeOverlay($('#chooser')); openOverlay($('#textSheet')); $('#pasteBox').focus(); });
+
+['fileCamera', 'fileLibrary', 'filePicker'].forEach((id) => {
+  $(`#${id}`).addEventListener('change', (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (file) captureFile(file);
+  });
+});
+
+$('#btnReadText').addEventListener('click', () => {
+  const text = $('#pasteBox').value.trim();
+  if (!text) return toast('Paste something first');
+  closeOverlay($('#textSheet'));
+  $('#pasteBox').value = '';
+  runCapture({ kind: 'text', text }, null);
+});
+
+// Paste a screenshot straight in, from anywhere in the app.
+window.addEventListener('paste', (e) => {
+  if (!$('#review').hidden || !$('#editor').hidden) return;
+  const file = [...(e.clipboardData?.files || [])][0];
+  if (file) { e.preventDefault(); return captureFile(file); }
+  const text = e.clipboardData?.getData('text');
+  if (text && text.trim().length > 12 && $('#textSheet').hidden) {
+    e.preventDefault();
+    runCapture({ kind: 'text', text }, null);
+  }
+});
+
+['dragover', 'drop'].forEach((ev) => window.addEventListener(ev, (e) => {
+  e.preventDefault();
+  if (ev === 'drop' && e.dataTransfer?.files?.[0]) captureFile(e.dataTransfer.files[0]);
+}));
+
+function readAsDataURL(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
-    r.onload = () => resolve(String(r.result).split(',')[1]);
-    r.onerror = reject;
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error('could not read that file'));
     r.readAsDataURL(file);
   });
 }
 
 async function captureFile(file) {
-  if (!file) return;
-  busy(`Reading ${file.name || 'image'}…`);
-  try {
-    const data = await fileToBase64(file);
-    const result = await api('/api/capture', {
-      method: 'POST',
-      body: { kind: file.type === 'application/pdf' ? 'pdf' : 'image', filename: file.name || 'capture.png', data },
-    });
-    renderResult(result);
-  } catch (e) {
-    $('#captureResult').innerHTML = `<div class="banner warn">Couldn't read that — ${esc(e.message)}</div>`;
-  }
+  if (file.size > 32 * 1024 * 1024) return toast('That file is too big — 32 MB is the limit');
+  let dataURL;
+  try { dataURL = await readAsDataURL(file); } catch (e) { return toast(e.message); }
+  const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+  runCapture({
+    kind: isPdf ? 'pdf' : 'image',
+    filename: file.name || (isPdf ? 'document.pdf' : 'photo.jpg'),
+    data: String(dataURL).split(',')[1],
+    // When the photo was taken, not when it was imported: a letter photographed
+    // yesterday saying "tomorrow" does not mean the day after today.
+    takenAt: file.lastModified ? localDateOf(file.lastModified) : undefined,
+  }, isPdf ? null : dataURL);
 }
 
-async function captureText(text) {
-  if (!text.trim()) return;
-  busy('Looking for dates…');
-  try {
-    const result = await api('/api/capture', { method: 'POST', body: { kind: 'text', text } });
-    renderResult(result);
-  } catch (e) {
-    $('#captureResult').innerHTML = `<div class="banner warn">${esc(e.message)}</div>`;
+const SCAN_LINES = [
+  'Looking at the page…',
+  'Finding the dates…',
+  'Reading what is actually printed…',
+  'Checking the days against the dates…',
+  'Almost there…',
+];
+
+async function runCapture(payload, previewURL) {
+  const scanner = $('#scanner');
+  const img = $('#scanImg');
+  const doc = $('#scanDoc');
+  $('#scanBoxes').innerHTML = '';
+  if (previewURL) { img.src = previewURL; img.hidden = false; doc.hidden = true; }
+  else { img.hidden = true; img.removeAttribute('src'); doc.hidden = false; }
+
+  openOverlay(scanner);
+  let step = 0;
+  $('#scanText').textContent = SCAN_LINES[0];
+  state.scanTimer = setInterval(() => {
+    step = Math.min(step + 1, SCAN_LINES.length - 1);
+    $('#scanText').textContent = SCAN_LINES[step];
+  }, 2100);
+
+  let cancelled = false;
+  $('#scanCancel').onclick = () => { cancelled = true; stopScan(); closeOverlay(scanner); };
+
+  const res = await api('/api/capture', {
+    method: 'POST',
+    body: { ...payload, now: localNow(), tz: timezone() },
+  });
+  if (cancelled) return;
+  stopScan();
+
+  if (res.error) { closeOverlay(scanner); return toast(res.error); }
+
+  // Let the boxes land on the page before moving on — this is the moment the
+  // app proves it actually read the thing in front of you.
+  if (previewURL && res.items?.length) {
+    drawBoxes($('#scanBoxes'), res.items);
+    $('#scanText').textContent = res.items.length === 1 ? 'Found 1 date' : `Found ${res.items.length} dates`;
+    await new Promise((r) => setTimeout(r, 780));
   }
+  closeOverlay(scanner);
+  haptic(18);
+  showReview(res);
 }
 
-function busy(msg) {
-  $('#captureResult').innerHTML =
-    `<div class="card" style="display:flex;align-items:center;gap:11px">
-       <span class="spinner"></span><span class="muted">${esc(msg)}</span>
-     </div>`;
+function stopScan() { clearInterval(state.scanTimer); state.scanTimer = null; }
+
+function drawBoxes(svg, items) {
+  svg.innerHTML = items.map((i, n) => {
+    if (!i.bbox) return '';
+    const [x, y, w, h] = i.bbox;
+    const hot = (i.flags || []).length ? ' class="hot"' : '';
+    return `<rect${hot} x="${x * 100}" y="${y * 100}" width="${w * 100}" height="${h * 100}"
+            rx="0.8" style="animation-delay:${n * 70}ms"></rect>`;
+  }).join('');
 }
 
-$('#btnCamera').onclick = () => $('#fileCamera').click();
-$('#btnFile').onclick = () => $('#filePicker').click();
-$('#fileCamera').onchange = (e) => captureFile(e.target.files[0]);
-$('#filePicker').onchange = (e) => captureFile(e.target.files[0]);
-$('#btnPasteGo').onclick = () => captureText($('#pasteText').value);
+// ───────────────────────────────────────────────────────── review
 
-const dz = $('#dropzone');
-['dragenter', 'dragover'].forEach((ev) => dz.addEventListener(ev, (e) => {
-  e.preventDefault(); dz.classList.add('over');
-}));
-['dragleave', 'drop'].forEach((ev) => dz.addEventListener(ev, (e) => {
-  e.preventDefault(); dz.classList.remove('over');
-}));
-dz.addEventListener('drop', (e) => captureFile(e.dataTransfer.files[0]));
+function showReview(res) {
+  state.batch = res.batch;
+  state.items = res.items || [];
+  state.lastResponse = res;
+  renderReview();
+  openOverlay($('#review'));
+}
 
-// Screenshot -> Cmd-V -> done. The fastest path on a Mac.
-window.addEventListener('paste', (e) => {
-  if (state.view !== 'capture') return;
-  const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/'));
-  if (item) { e.preventDefault(); captureFile(item.getAsFile()); return; }
-  const text = e.clipboardData?.getData('text');
-  if (text && text.trim().length > 12 && document.activeElement?.tagName !== 'TEXTAREA') {
-    e.preventDefault();
-    captureText(text);
+async function reloadReview() {
+  const res = await api(`/api/batches/${state.batch.id}`);
+  if (res.error) return;
+  state.batch = res.batch;
+  state.items = res.items;
+  renderReview({ silent: true });
+}
+
+function renderReview({ silent = false } = {}) {
+  const items = state.items;
+  const blockers = items.filter((i) => i.blocked && !i.reviewed);
+  const checks = items.filter((i) => !i.blocked && (i.flags || []).length);
+
+  $('#reviewTitle').textContent = state.batch?.title?.slice(0, 40) || 'Found';
+  $('#foundLabel').textContent = items.length === 1 ? 'date found' : 'dates found';
+  $('#foundSub').textContent = blockers.length
+    ? `${blockers.length} need${blockers.length === 1 ? 's' : ''} your answer`
+    : checks.length ? `${checks.length} worth a check` : 'All clear';
+
+  if (silent) $('#foundCount').textContent = items.length;
+  else countUp($('#foundCount'), items.length);
+
+  const src = state.lastResponse || {};
+  let banner = '';
+  if (!items.length) {
+    banner = `<div class="banner warn">I couldn't find any dates on that. Try a straighter photo, or paste the text instead.</div>`;
+  } else if (blockers.length) {
+    banner = `<div class="banner stop"><b>Nothing here is guessed.</b> Where I couldn't be certain, I've asked instead — answer the ${blockers.length === 1 ? 'one below' : `${blockers.length} below`} and you're done.</div>`;
   }
+  if (src.readerError) {
+    banner += `<div class="banner warn">The reader couldn't handle this one (${esc(String(src.readerError).slice(0, 60))}), so this is the on-device reader's best effort.</div>`;
+  }
+  if (src.diff?.description) {
+    banner += `<div class="banner">Compared with the earlier version: ${esc(src.diff.description)}</div>`;
+  }
+  $('#diffBanner').innerHTML = banner;
+
+  const ordered = [...blockers,
+                   ...checks.filter((i) => !blockers.includes(i)),
+                   ...items.filter((i) => !blockers.includes(i) && !checks.includes(i))];
+
+  $('#reviewList').innerHTML = ordered.length
+    ? ordered.map((i, n) => itemCard(i, { delay: n, showFlags: true })).join('')
+    : '';
+  wireItemCards($('#reviewList'), items);
+
+  const addable = items.filter((i) => i.status !== 'rejected');
+  const btn = $('#btnAdd');
+  btn.disabled = !addable.length || blockers.length > 0;
+  btn.textContent = blockers.length
+    ? `${blockers.length} still to answer`
+    : addable.length ? `Add ${addable.length} to calendar` : 'Nothing to add';
+}
+
+function countUp(el, to) {
+  const start = performance.now();
+  const dur = Math.min(160 + to * 90, 900);
+  const tick = (t) => {
+    const p = Math.min((t - start) / dur, 1);
+    el.textContent = Math.round(to * (1 - Math.pow(1 - p, 3)));
+    if (p < 1) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+$('#reviewClose').addEventListener('click', () => { closeOverlay($('#review')); go('dates'); });
+$('#reviewSource').addEventListener('click', () => openViewer(null));
+
+$('#btnDiscard').addEventListener('click', async () => {
+  if (!state.batch) return;
+  await api(`/api/batches/${state.batch.id}`, { method: 'DELETE' });
+  closeOverlay($('#review'));
+  toast('Thrown away');
+  go('dates');
 });
 
-// ------------------------------------------------------------------ result
+$('#btnAdd').addEventListener('click', async () => {
+  if (!state.batch) return;
+  const res = await api(`/api/batches/${state.batch.id}/commit`, { method: 'POST', body: {} });
+  if (res.error === 'needs_review') { toast(res.message); return reloadReview(); }
+  if (res.error) return toast(res.error);
+  haptic(30);
+  showAdded(res.committed);
+});
 
-function confClass(c) { return c >= 0.8 ? 'hi' : c >= 0.6 ? 'mid' : 'lo'; }
-
-function whenText(i) {
-  if (!i.start_date) return 'No date yet';
-  let s = i.human_date || i.start_date;
-  if (i.end_date && i.end_date !== i.start_date) s += ` → ${i.end_date}`;
-  if (i.human_time) s += `, ${i.human_time}`;
-  return s;
-}
-
-function renderResult(result) {
-  state.batch = result.batch;
-  state.items = result.items;
-  state.sel = new Set();
-  state.result = result;
-
-  const el = $('#captureResult');
-  if (!result.items.length) {
-    el.innerHTML = `
-      <div class="banner warn"><strong>No dates found.</strong></div>
-      <p class="muted">${result.ocrError
-        ? `The reader couldn't open that file (${esc(result.ocrError)}).`
-        : 'Nothing in there looked like a date. Try a clearer photo, or paste the text instead.'}</p>`;
-    return;
-  }
-
-  // Low risk earns one card and one decision. Everything else gets the table.
-  if (result.risk === 'low') return renderConfirmCard(result);
-  renderFullReview(result);
-}
-
-/** The three-tap path: what it found, and a button. Detail is opt-in. */
-function renderConfirmCard(result) {
-  const items = result.items;
-  const one = items.length === 1 ? items[0] : null;
-  $('#captureResult').innerHTML = `
-    <div class="confirm">
-      ${one
-        ? `<div class="what">${esc(one.title)}</div>
-           <div class="whenline">${esc(whenText(one))}${one.location ? ` · ${esc(one.location)}` : ''}</div>`
-        : `<div class="what">${items.length} dates found</div>
-           <div class="whenline">${items.map((i) => esc(i.title)).join(' · ')}</div>`}
-      <div class="actions">
-        <button class="btn primary big" id="btnCommit">Keep ${one ? 'it' : 'them'}</button>
-        <button class="btn ghost" id="btnDiscard">No thanks</button>
-      </div>
-      <div class="more"><button class="btn tiny ghost" id="btnShowDetail">Check where these came from</button></div>
+function showAdded(count) {
+  const batchId = state.batch.id;
+  $('#reviewList').innerHTML = `
+    <div class="done-mark">
+      <svg viewBox="0 0 60 60"><circle cx="30" cy="30" r="27"/><path d="M18 31l8.5 8.5L43 23"/></svg>
+    </div>
+    <div class="hero" style="text-align:center">
+      <h1>${count} added</h1>
+      <p class="sub">They're in KevCal. Send them to your real calendar too:</p>
+    </div>
+    <div class="choices two" style="margin-top:4px">
+      <button class="choice" id="doneIcs" type="button"><span class="ico">📅</span><b>Add to Calendar</b></button>
+      <button class="choice" id="doneShare" type="button"><span class="ico">📤</span><b>Send to someone</b></button>
     </div>`;
-  $('#btnCommit').onclick = commitCurrent;
-  $('#btnDiscard').onclick = discardCurrent;
-  $('#btnShowDetail').onclick = () => renderFullReview(result);
+  $('#diffBanner').innerHTML = '';
+  $('#foundSub').textContent = 'Undo any time from Imports';
+  $('#doneIcs').onclick = () => window.open(`/api/export.ics?batch=${batchId}`, '_blank');
+  $('#doneShare').onclick = () => openShare({ batchId });
+  $('#btnAdd').textContent = 'Done';
+  $('#btnAdd').disabled = false;
+  $('#btnAdd').onclick = () => { closeOverlay($('#review')); go('dates'); };
+  $('#btnDiscard').textContent = 'Undo';
+  $('#btnDiscard').onclick = async () => {
+    await api(`/api/batches/${batchId}/undo`, { method: 'POST' });
+    closeOverlay($('#review'));
+    toast('Taken back out');
+    go('dates');
+  };
 }
 
-function renderFullReview(result) {
-  const needing = result.items.filter((i) => i.needs_review);
-  const parts = [];
+// ───────────────────────────────────────────────────────── item editor
 
-  if (result.diff) {
-    const s = result.diff.summary;
-    const bits = [];
-    if (s.changed) bits.push(`${s.changed} changed`);
-    if (s.added) bits.push(`${s.added} added`);
-    if (s.removed) bits.push(`${s.removed} removed`);
-    if (s.conflicts) bits.push(`${s.conflicts} you'd edited (left alone)`);
-    parts.push(`<div class="banner info">
-      <strong>This is a newer version.</strong> ${esc(bits.join(', ') || 'Nothing has changed')} — nothing was duplicated.
-    </div>`);
-  }
+let editing = null;
 
-  parts.push(sourceBlock(result));
-
-  parts.push(`<div class="card">
-    <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">
-      <span class="bignum" id="foundCount">0</span>
-      <span class="muted">${result.items.length === 1 ? 'thing found' : 'things found'}${
-        needing.length ? ` · <strong style="color:var(--due)">${needing.length} need${needing.length === 1 ? 's' : ''} a look</strong>` : ''}</span>
-    </div>
-    <p class="muted" style="margin:0">${needing.length
-      ? 'The uncertain ones are at the top. The rest are folded away.'
-      : 'Tap any row to see where it came from.'}</p>
-  </div>`);
-
-  parts.push('<div id="itemList"></div>');
-  parts.push(`<div class="actions" style="margin-top:14px;justify-content:flex-start">
-    <button class="btn primary big" id="btnCommit">Keep these ${result.items.length} dates</button>
-    <button class="btn" id="btnDiscard">Discard</button>
-  </div>`);
-
-  $('#captureResult').innerHTML = parts.join('');
-  renderItemList();
-  countUp($('#foundCount'), result.items.length);
-  $('#btnCommit').onclick = commitCurrent;
-  $('#btnDiscard').onclick = discardCurrent;
-}
-
-async function discardCurrent() {
-  await api(`/api/batches/${state.batch.id}`, { method: 'DELETE' });
-  $('#captureResult').innerHTML = '';
-  toast('Discarded.');
-}
-
-function sourceBlock(result) {
-  const kind = state.batch.source_kind;
-  // A PDF cannot render in an <img>, so don't draw boxes over a broken image.
-  if (kind !== 'image') {
-    return `<div class="card"><p class="muted" style="margin:0">
-      Read from <strong>${esc(state.batch.source_name || 'your text')}</strong>.
-      Each row below shows the exact wording it came from.</p></div>`;
-  }
-  const boxes = result.items.filter((i) => i.bbox).map((i, n) => {
-    const [x, y, w, h] = i.bbox;
-    // Pad thin lines so a 5px sliver is actually visible and tappable.
-    const padY = Math.max(0, (1.6 - 1) * h / 2);
-    return `<rect data-id="${i.id}" class="${i.kind === 'deadline' ? 'due' : ''}"
-      x="${(x * 100).toFixed(2)}" y="${((y - padY) * 100).toFixed(2)}"
-      width="${(w * 100).toFixed(2)}" height="${(h * 1.6 * 100).toFixed(2)}"
-      rx="0.6" style="animation-delay:${n * 55}ms"></rect>`;
-  }).join('');
-  return `<div class="source-wrap" id="sourceWrap">
-    <img src="/api/source/${state.batch.id}" alt="The document you captured">
-    <svg viewBox="0 0 100 100" preserveAspectRatio="none">${boxes}</svg>
-  </div>`;
-}
-
-function countUp(el, target) {
-  if (!el) return;
-  let n = 0;
-  const step = Math.max(1, Math.round(target / 14));
-  const t = setInterval(() => {
-    n = Math.min(target, n + step);
-    el.textContent = n;
-    if (n >= target) clearInterval(t);
-  }, 28);
-}
-
-function renderItemList() {
-  const list = $('#itemList');
-  if (!list) return;
-  const needing = state.items.filter((i) => i.needs_review);
-  const fine = state.items.filter((i) => !i.needs_review);
-
-  let html = '';
-  if (needing.length) html += needing.map(itemRow).join('');
-  if (fine.length) {
-    html += needing.length
-      ? `<details class="collapsed-ok"><summary>${fine.length} look fine</summary>${fine.map(itemRow).join('')}</details>`
-      : fine.map(itemRow).join('');
-  }
-  list.innerHTML = html + bulkBar();
-  wireItems(list);
-}
-
-function itemRow(i) {
-  const sel = state.sel.has(i.id);
-  const rec = i.recurrence;
-  const confLabel = i.confidence >= 0.8 ? 'confident' : i.confidence >= 0.6 ? 'fairly sure' : 'unsure';
-  return `<div class="item ${i.needs_review ? 'review' : ''} ${sel ? 'selected' : ''} ${i.satisfied ? 'satisfied' : ''}" data-id="${i.id}">
-    <div class="item-head">
-      <button type="button" class="check" data-act="select" aria-pressed="${sel}"
-              aria-label="Select ${esc(i.title)}">✓</button>
-      <div class="item-main">
-        <div class="title">${esc(i.title)}</div>
-        <div class="when">${esc(whenText(i))}${i.location ? ` · ${esc(i.location)}` : ''}</div>
-        <div class="meta">
-          <span class="conf ${confClass(i.confidence)}" role="img" aria-label="${confLabel}"></span>
-          <span class="chip ${i.kind === 'deadline' ? 'due' : 'evt'}">${i.kind === 'deadline' ? 'Deadline' : 'Event'}</span>
-          ${i.needs_review ? '<span class="chip low">Needs a look</span>' : ''}
-          ${rec ? `<span class="chip rec">repeats? “${esc(rec.phrase || '')}”</span>` : ''}
-          ${i.cost ? `<span class="chip">${esc(i.cost)}</span>` : ''}
-          <button class="btn tiny ghost" data-act="expand">Edit</button>
-        </div>
-        ${i.question ? `<div class="provenance" style="border-color:var(--due)"><b>${esc(i.question)}</b></div>` : ''}
+function openEditor(item) {
+  editing = item;
+  const crop = $('#editCrop');
+  const batchId = item.batch_id || state.batch?.id;
+  if (item.bbox && batchId) {
+    const [x, y, w, h] = item.bbox;
+    const padX = Math.min(0.04, x), padY = Math.min(0.06, y);
+    const zoom = 1 / Math.min(1, Math.max(w + padX * 2, 0.12));
+    crop.innerHTML = `
+      <div style="overflow:hidden;position:relative;aspect-ratio:16/6">
+        <img src="/api/source/${batchId}" alt="" style="position:absolute;width:${zoom * 100}%;max-width:none;
+             left:${-(x - padX) * zoom * 100}%;top:${-(y - padY) * zoom * 100}%">
       </div>
-    </div>
-  </div>`;
-}
-
-function itemEditor(i) {
-  const rec = i.recurrence;
-  return `<div class="item-body">
-    <div class="field-row">
-      <div class="field" style="flex:1 1 100%"><label>Title</label>
-        <input data-f="title" value="${esc(i.title)}"></div>
-    </div>
-    <div class="field-row">
-      <div class="field"><label>Date</label><input type="date" data-f="start_date" value="${esc(i.start_date || '')}"></div>
-      <div class="field"><label>Time</label><input type="time" data-f="start_time" value="${esc(i.start_time || '')}"></div>
-      <div class="field"><label>Ends</label><input type="time" data-f="end_time" value="${esc(i.end_time || '')}"></div>
-    </div>
-    <div class="field-row">
-      <div class="field"><label>Type</label>
-        <select data-f="kind">
-          <option value="event"${i.kind === 'event' ? ' selected' : ''}>Event</option>
-          <option value="deadline"${i.kind === 'deadline' ? ' selected' : ''}>Deadline</option>
-        </select></div>
-      <div class="field"><label>Where</label><input data-f="location" value="${esc(i.location || '')}"></div>
-    </div>
-    ${i.notes ? `<div class="field"><label>Notes</label><textarea data-f="notes" rows="2">${esc(i.notes)}</textarea></div>` : ''}
-    ${rec ? `<div class="provenance">
-      <b>This might repeat.</b> The document said “${esc(rec.phrase || '')}”.
-      KevCal has <b>not</b> made it repeat — a wrong repeat is worse than none.
-      <div class="actions" style="justify-content:flex-start;margin-top:8px">
-        <button class="btn tiny" data-act="repeat">Make it repeat…</button>
-      </div></div>` : ''}
-    <div class="provenance">
-      <b>Where this came from</b><br>
-      ${i.src_interpretation ? `${esc(i.src_interpretation)}<br>` : ''}
-      ${i.src_raw ? `<span class="raw">“${esc(i.src_raw)}”</span>` : '<span class="raw">No source text — this one was typed in.</span>'}
-      ${i.src_page > 1 ? `<br><span class="raw">page ${i.src_page}</span>` : ''}
-    </div>
-    <div class="actions" style="justify-content:flex-start;margin-top:10px">
-      <button class="btn tiny primary" data-act="save">Save</button>
-      ${i.needs_review ? '<button class="btn tiny" data-act="ok">Looks right</button>' : ''}
-      <button class="btn tiny danger" data-act="delete">Delete</button>
-    </div>
-  </div>`;
-}
-
-function bulkBar() {
-  if (!state.sel.size) return '';
-  return `<div class="bulkbar">
-    <span class="count">${state.sel.size} selected</span>
-    <button class="btn tiny" data-bulk="shift" data-days="7">+1 week</button>
-    <button class="btn tiny" data-bulk="shift" data-days="-7">−1 week</button>
-    <button class="btn tiny" data-bulk="shift" data-days="1">+1 day</button>
-    <button class="btn tiny" data-bulk="shift" data-days="-1">−1 day</button>
-    <button class="btn tiny" data-bulk="deadline">Mark deadline</button>
-    <button class="btn tiny" data-bulk="review">Looks right</button>
-    <button class="btn tiny danger" data-bulk="delete">Delete</button>
-    <button class="btn tiny ghost" data-bulk="clear">Clear</button>
-  </div>`;
-}
-
-function wireItems(root) {
-  $$('.item', root).forEach((row) => {
-    const id = row.dataset.id;
-    const item = state.items.find((x) => x.id === id);
-    if (!item) return;
-
-    row.querySelector('[data-act="select"]').onclick = (e) => {
-      e.stopPropagation();
-      state.sel.has(id) ? state.sel.delete(id) : state.sel.add(id);
-      renderItemList();
-    };
-
-    row.querySelector('[data-act="expand"]').onclick = (e) => {
-      e.stopPropagation();
-      const open = row.querySelector('.item-body');
-      if (open) { open.remove(); return; }
-      row.insertAdjacentHTML('beforeend', itemEditor(item));
-      wireEditor(row, item);
-    };
-
-    row.querySelector('.item-head').onclick = () => focusBox(id);
-  });
-
-  $$('[data-bulk]', root).forEach((b) => b.onclick = () => runBulk(b.dataset.bulk, b.dataset.days));
-}
-
-function wireEditor(row, item, onChange = renderItemList) {
-  const body = row.querySelector('.item-body');
-  body.querySelector('[data-act="save"]').onclick = async () => {
-    const patch = {};
-    $$('[data-f]', body).forEach((f) => { patch[f.dataset.f] = f.value || null; });
-    patch.all_day = patch.start_time ? 0 : 1;
-    const { item: updated } = await api(`/api/items/${item.id}`, { method: 'PATCH', body: patch });
-    Object.assign(item, updated);
-    onChange();
-    toast('Saved.');
-  };
-  body.querySelector('[data-act="delete"]').onclick = async () => {
-    await api('/api/items/bulk', { method: 'POST', body: { ids: [item.id], op: 'delete' } });
-    state.items = state.items.filter((x) => x.id !== item.id);
-    onChange();
-    toast('Deleted.');
-  };
-  body.querySelector('[data-act="ok"]')?.addEventListener('click', async () => {
-    await api('/api/items/bulk', { method: 'POST', body: { ids: [item.id], op: 'review' } });
-    item.needs_review = 0;
-    onChange();
-    toast('Marked as right.');
-  });
-  body.querySelector('[data-act="repeat"]')?.addEventListener('click', () => askRepeat(item));
-}
-
-/** A repeat is never created without an explicit end — we do not extrapolate. */
-async function askRepeat(item) {
-  const until = prompt(
-    'Repeat until which date? (YYYY-MM-DD)\n\n' +
-    'KevCal needs an end date — it will not invent repeats that run forever.',
-    item.start_date || '');
-  if (!until) return;
-  try {
-    await api(`/api/items/${item.id}/recurrence`, { method: 'POST', body: { accept: true, until } });
-    toast('Repeat set.');
-  } catch (e) { toast(e.message); }
-}
-
-function focusBox(id) {
-  state.focusId = id;
-  const rects = $$('#sourceWrap rect');
-  if (!rects.length) return;
-  rects.forEach((r) => {
-    r.classList.toggle('focus', r.dataset.id === id);
-    r.classList.toggle('dim', r.dataset.id !== id);
-  });
-  const target = rects.find((r) => r.dataset.id === id);
-  if (target) $('#sourceWrap').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-}
-
-async function runBulk(op, days) {
-  const ids = [...state.sel];
-  if (!ids.length) return;
-  if (op === 'clear') { state.sel = new Set(); return renderItemList(); }
-  const map = {
-    shift: { op: 'shift_days', days: Number(days) },
-    deadline: { op: 'set_kind', kind: 'deadline' },
-    review: { op: 'review' },
-    delete: { op: 'delete' },
-  };
-  await api('/api/items/bulk', { method: 'POST', body: { ids, ...map[op] } });
-  if (op === 'delete') {
-    state.items = state.items.filter((i) => !state.sel.has(i.id));
-    state.sel = new Set();
+      <span class="tapme">see the page</span>`;
+    crop.onclick = () => openViewer(item);
   } else {
-    const { items } = await api(`/api/batches/${state.batch.id}`);
-    state.items = items;
+    crop.innerHTML = `<div class="quote">${esc(item.src_raw || 'Added by hand')}</div>`;
+    crop.onclick = null;
   }
-  renderItemList();
-  toast(op === 'shift' ? `Moved ${ids.length} by ${days} day${Math.abs(days) === 1 ? '' : 's'}.` : 'Done.');
+
+  $('#editFlags').innerHTML = (item.flags || []).map((f) => flagBlock(item, f)).join('')
+    + (item.src_interpretation ? `<div class="banner">${esc(item.src_interpretation)}</div>` : '');
+  wireItemCards($('#editFlags'), [item]);
+
+  $('#edTitle').value = item.title || '';
+  $('#edDate').value = item.start_date || '';
+  $('#edEndDate').value = item.end_date || '';
+  $('#edStart').value = item.start_time || '';
+  $('#edEnd').value = item.end_time || '';
+  $('#edWhere').value = item.location || '';
+  $('#edNotes').value = item.notes || '';
+  $('#edAllDay').checked = !!item.all_day;
+  $('#edTimes').style.display = item.all_day ? 'none' : '';
+  $$('#edKind button').forEach((b) => b.classList.toggle('on', b.dataset.kind === item.kind));
+
+  openOverlay($('#editor'));
 }
 
-async function commitCurrent() {
-  try {
-    const r = await api(`/api/batches/${state.batch.id}/commit`, { method: 'POST' });
-    const batchId = state.batch.id;
-    state.lastCommit = batchId;
-    $('#captureResult').innerHTML = `
-      <div class="banner good">
-        <strong>Added ${r.committed}.</strong> They're in your Dates list.
-      </div>
-      <div class="actions" style="justify-content:flex-start">
-        <button class="btn primary" id="btnOpenCal">Open in the Mac's Calendar</button>
-        <button class="btn" id="btnDownloadIcs">Download .ics</button>
-        <button class="btn" id="btnShareNow">Share these</button>
-        <button class="btn ghost" id="btnUndoNow">Undo the whole import</button>
-      </div>`;
-    $('#btnOpenCal').onclick = () => openInCalendar(batchId);
-    $('#btnDownloadIcs').onclick = () => { window.location = `/api/export.ics?batch=${batchId}`; };
-    $('#btnShareNow').onclick = () => openShare(batchId);
-    $('#btnUndoNow').onclick = () => undoBatch(batchId, true);
-    toast(`Added ${r.committed}.`, 'Undo', () => undoBatch(batchId, true));
-  } catch (e) {
-    if (e.status === 409) {
-      toast(e.data.message || 'Some items still need checking.');
-      const first = $('.item.review [data-act="expand"]');
-      first?.click();
-      first?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    } else toast(e.message);
-  }
+$('#edAllDay').addEventListener('change', (e) => {
+  $('#edTimes').style.display = e.target.checked ? 'none' : '';
+});
+$$('#edKind button').forEach((b) => b.addEventListener('click', () => {
+  $$('#edKind button').forEach((x) => x.classList.toggle('on', x === b));
+}));
+
+$('#edSave').addEventListener('click', async () => {
+  if (!editing) return;
+  const allDay = $('#edAllDay').checked;
+  const body = {
+    title: $('#edTitle').value.trim() || '(untitled)',
+    kind: $('#edKind button.on')?.dataset.kind || 'event',
+    start_date: $('#edDate').value || null,
+    end_date: $('#edEndDate').value || null,
+    all_day: allDay ? 1 : 0,
+    start_time: allDay ? null : ($('#edStart').value || null),
+    end_time: allDay ? null : ($('#edEnd').value || null),
+    location: $('#edWhere').value.trim() || null,
+    notes: $('#edNotes').value.trim() || null,
+  };
+  const res = await api(`/api/items/${editing.id}`, { method: 'PATCH', body });
+  if (res.error) return toast(res.error);
+  haptic(12);
+  closeOverlay($('#editor'));
+  toast('Saved');
+  await refreshCurrent();
+});
+
+$('#edDelete').addEventListener('click', async () => {
+  if (!editing) return;
+  await api('/api/items/bulk', { method: 'POST', body: { op: 'delete', ids: [editing.id] } });
+  closeOverlay($('#editor'));
+  toast('Removed');
+  await refreshCurrent();
+});
+
+// ───────────────────────────────────────────────────────── source viewer
+
+function openViewer(item) {
+  const batchId = item?.batch_id || state.batch?.id;
+  if (!batchId) return toast('No original for this one');
+  $('#viewerImg').src = `/api/source/${batchId}`;
+  const pool = item ? [item] : state.items;
+  drawBoxes($('#viewerBoxes'), pool);
+  $('#viewerCap').textContent = item?.src_raw
+    ? `“${item.src_raw}”`
+    : 'Every date KevCal read, boxed on the original.';
+  openOverlay($('#viewer'));
 }
+$('#viewerClose').addEventListener('click', () => closeOverlay($('#viewer')));
 
-async function openInCalendar(batchId) {
-  try {
-    const r = await api('/api/open-ics', { method: 'POST', body: { batchId } });
-    toast(r.ok ? `Opening ${r.count} in the Calendar app on the Mac running KevCal.` : 'Download the .ics instead.');
-    if (!r.ok) window.location = `/api/export.ics?batch=${batchId}`;
-  } catch (e) { toast(e.message); }
-}
-
-async function undoBatch(batchId, fromCapture) {
-  const r = await api(`/api/batches/${batchId}/undo`, { method: 'POST' });
-  toast(`Removed ${r.removed}.`, 'Put them back', async () => {
-    await api(`/api/batches/${batchId}/redo`, { method: 'POST' });
-    toast('Restored.');
-    if (state.view === 'imports') loadImports();
-    if (state.view === 'dates') loadAgenda();
-  });
-  if (fromCapture) $('#captureResult').innerHTML = '<div class="banner info">Import undone.</div>';
-  if (state.view === 'imports') loadImports();
-  if (state.view === 'dates') loadAgenda();
-}
-
-// ------------------------------------------------------------------ dates
-
-async function loadAgenda() {
-  const { items } = await api('/api/agenda');
-  const el = $('#datesContent');
-  if (!items.length) {
-    el.innerHTML = `<div class="empty"><span class="glyph">🗓️</span>Nothing in here yet.<br>
-      <span class="muted">Capture something and it'll show up.</span></div>`;
-    return;
-  }
-  const today = new Date().toISOString().slice(0, 10);
-  const dated = items.filter((i) => i.start_date);
-  const undated = items.filter((i) => !i.start_date);
-
-  let html = '';
-  let month = '';
-  for (const i of dated) {
-    const m = i.start_date.slice(0, 7);
-    if (m !== month) {
-      month = m;
-      const d = new Date(`${m}-01T00:00:00Z`);
-      html += `<div class="month-head">${d.toLocaleString('en-GB', { month: 'long', year: 'numeric', timeZone: 'UTC' })}</div>`;
-    }
-    html += agendaRow(i, today);
-  }
-  if (undated.length) {
-    html += `<div class="month-head">Waiting on a date</div>`;
-    html += undated.map((i) => agendaRow(i, today)).join('');
-  }
-  el.innerHTML = html;
-
-  $('.item', el).forEach((row) => {
-    const item = items.find((x) => x.id === row.dataset.id);
-    if (!item) return;
-    row.querySelector('[data-act="expand"]').onclick = () => {
-      const open = row.querySelector('.item-body');
-      if (open) { open.remove(); return; }
-      row.insertAdjacentHTML('beforeend', itemEditor(item));
-      wireEditor(row, item, loadAgenda);
-    };
-  });
-
-  $('[data-satisfy]', el).forEach((b) => b.onclick = async () => {
-    const id = b.dataset.satisfy;
-    const item = items.find((x) => x.id === id);
-    await api('/api/items/bulk', { method: 'POST', body: { ids: [id], op: item.satisfied ? 'unsatisfy' : 'satisfy' } });
-    loadAgenda();
-  });
-  requestAnimationFrame(() => $$('.runway i', el).forEach((b) => { b.style.width = b.dataset.w; }));
-}
-
-function agendaRow(i, today) {
-  const day = i.start_date ? i.start_date.slice(8, 10) : '—';
-  const mon = i.start_date
-    ? new Date(`${i.start_date}T00:00:00Z`).toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' })
-    : '';
-  const isToday = i.start_date === today;
-  const overdue = i.days_left != null && i.days_left < 0 && !i.satisfied && i.kind === 'deadline';
-  const runway = i.kind === 'deadline' && i.runway != null && !i.satisfied
-    ? `<div class="runway ${overdue ? 'past' : ''}"><i data-w="${Math.round(i.runway * 100)}%" style="width:0"></i></div>` : '';
-  const left = i.days_left == null ? ''
-    : i.days_left === 0 ? 'today'
-    : i.days_left > 0 ? `in ${i.days_left} day${i.days_left === 1 ? '' : 's'}`
-    : `${Math.abs(i.days_left)} day${Math.abs(i.days_left) === 1 ? '' : 's'} ago`;
-  const lead = (i.lead_days_resolved || []).filter((d) => d > 0);
-
-  return `<div class="item ${i.satisfied ? 'satisfied' : ''} ${overdue ? 'overdue' : ''}" data-id="${i.id}">
-    <div class="item-head">
-      <div class="day-badge ${isToday ? 'today' : ''}"><div class="d">${day}</div><div class="m">${mon}</div></div>
-      <div class="item-main">
-        <div class="title">${esc(i.title)}</div>
-        <div class="when">${i.human_time ? esc(i.human_time) + ' · ' : ''}${esc(left)}${i.location ? ' · ' + esc(i.location) : ''}</div>
-        ${runway}
-        <div class="meta">
-          ${overdue ? '<span class="overdue-flag">Overdue</span>' : ''}
-          <span class="chip ${i.kind === 'deadline' ? 'due' : 'evt'}">${i.kind === 'deadline' ? 'Deadline' : 'Event'}</span>
-          ${i.satisfied ? '<span class="chip ok">Sorted</span>' : ''}
-          ${lead.length && !i.satisfied ? `<span class="chip">nudges ${lead.join(', ')} days ahead</span>` : ''}
-          ${i.batch_title ? `<span class="chip">${esc(i.batch_title)}</span>` : ''}
-          ${i.kind === 'deadline'
-            ? `<button class="btn tiny" data-satisfy="${i.id}">${i.satisfied ? 'Not done after all' : 'Mark sorted'}</button>`
-            : ''}
-          <button class="btn tiny ghost" data-act="expand">Edit</button>
-        </div>
-      </div>
-    </div>
-  </div>`;
-}
-
-// ------------------------------------------------------------------ imports
+// ───────────────────────────────────────────────────────── imports
 
 async function loadImports() {
-  const { batches } = await api('/api/batches');
-  const el = $('#importsContent');
+  const { batches = [] } = await api('/api/batches');
+  const list = $('#importsList');
   if (!batches.length) {
-    el.innerHTML = `<div class="empty"><span class="glyph">📥</span>No imports yet.</div>`;
+    list.innerHTML = `<div class="empty"><span class="g">📥</span><b>No imports yet</b>Every capture shows up here, and every one can be undone whole.</div>`;
     return;
   }
-  el.innerHTML = `<div class="card">${batches.map((b) => {
-    const when = new Date(b.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
+  list.innerHTML = batches.map((b) => {
+    const when = new Date(b.created_at);
     const undone = b.status === 'undone';
-    const thumb = b.source_path
-      ? `<img class="thumb" src="/api/source/${b.id}" alt="">`
-      : `<div class="thumb glyph">📝</div>`;
-    return `<div class="batch-row">
-      ${thumb}
-      <div style="flex:1;min-width:0">
-        <div class="title" style="font-weight:570">${esc(b.title)}</div>
-        <div class="muted" style="font-size:12.5px">
-          ${when} · ${b.item_count} found${b.accepted_count ? `, ${b.accepted_count} added` : ''}
-          ${undone ? ' · <span style="color:var(--warn)">undone</span>' : ''}
-        </div>
+    return `<div class="card">
+      <h3>${esc(b.title)}</h3>
+      <div class="item-meta" style="margin-bottom:10px">
+        <span>${when.toLocaleDateString()} ${when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
+        <span>${b.accepted_count || 0} of ${b.item_count || 0} kept</span>
+        <span>${esc(b.engine)}</span>
+        ${undone ? '<span class="kindtag">UNDONE</span>' : ''}
       </div>
-      <div style="display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end">
-        <button class="btn tiny" data-share="${b.id}">Share</button>
-        <button class="btn tiny" data-${undone ? 'redo' : 'undo'}="${b.id}">${undone ? 'Restore' : 'Undo'}</button>
-        <button class="btn tiny danger" data-del="${b.id}">Delete</button>
+      <div class="row">
+        <button class="btn" data-open="${b.id}" type="button">Open</button>
+        ${undone
+          ? `<button class="btn" data-redo="${b.id}" type="button">Restore</button>`
+          : `<button class="btn" data-undo="${b.id}" type="button">Undo</button>`}
+        <button class="btn" data-share="${b.id}" type="button">Share</button>
+        <button class="btn ghost" data-del="${b.id}" type="button">Delete</button>
       </div>
     </div>`;
-  }).join('')}</div>`;
+  }).join('');
 
-  $$('[data-share]', el).forEach((b) => b.onclick = () => openShare(b.dataset.share));
-  $$('[data-undo]', el).forEach((b) => b.onclick = () => undoBatch(b.dataset.undo));
-  $$('[data-redo]', el).forEach((b) => b.onclick = async () => {
+  $$('[data-open]', list).forEach((b) => b.onclick = async () => {
+    const res = await api(`/api/batches/${b.dataset.open}`);
+    if (res.error) return toast(res.error);
+    state.lastResponse = {};
+    showReview(res);
+  });
+  $$('[data-undo]', list).forEach((b) => b.onclick = async () => {
+    const r = await api(`/api/batches/${b.dataset.undo}/undo`, { method: 'POST' });
+    toast(`Took back ${r.removed} date${r.removed === 1 ? '' : 's'}`, {
+      label: 'Restore',
+      run: async () => { await api(`/api/batches/${b.dataset.undo}/redo`, { method: 'POST' }); loadImports(); },
+    });
+    loadImports();
+  });
+  $$('[data-redo]', list).forEach((b) => b.onclick = async () => {
     await api(`/api/batches/${b.dataset.redo}/redo`, { method: 'POST' });
-    loadImports(); toast('Restored.');
+    toast('Put back');
+    loadImports();
   });
-  $$('[data-del]', el).forEach((b) => b.onclick = async () => {
-    if (!confirm('Delete this import and its original image for good?')) return;
+  $$('[data-share]', list).forEach((b) => b.onclick = () => openShare({ batchId: b.dataset.share }));
+  $$('[data-del]', list).forEach((b) => b.onclick = async () => {
+    if (!confirm('Delete this import and its original image? This cannot be undone.')) return;
     await api(`/api/batches/${b.dataset.del}`, { method: 'DELETE' });
-    loadImports(); toast('Deleted.');
+    toast('Deleted');
+    loadImports();
   });
 }
 
-// ------------------------------------------------------------------ share
+// ───────────────────────────────────────────────────────── share
 
-let shareBatchId = null;
-async function openShare(batchId) {
-  shareBatchId = batchId;
-  const { text } = await api(`/api/share/text?batch=${batchId}`);
+async function openShare(ctx) {
+  state.shareCtx = ctx;
+  const q = ctx.batchId ? `batch=${ctx.batchId}` : `items=${(ctx.itemIds || []).join(',')}`;
+  const { text = '' } = await api(`/api/share/text?${q}`);
   $('#shareText').textContent = text;
-  $('#shareDialog').showModal();
+  openOverlay($('#shareSheet'));
+
+  $('#shCopy').onclick = async () => {
+    try { await navigator.clipboard.writeText(text); toast('Copied'); }
+    catch { toast('Select the text and copy it'); }
+  };
+  $('#shIcs').onclick = () => window.open(`/api/export.ics?${q}`, '_blank');
+  $('#shNative').onclick = async () => {
+    if (!navigator.share) return toast('Sharing isn\'t available in this browser');
+    try { await navigator.share({ title: 'Dates', text }); } catch { /* dismissed */ }
+  };
+  $('#shLink').onclick = async () => {
+    const res = await api('/api/shares', { method: 'POST', body: { batchId: ctx.batchId, itemIds: ctx.itemIds } });
+    if (res.error) return toast(res.error);
+    const url = `${location.origin}${res.path}.ics`;
+    try { await navigator.clipboard.writeText(url); toast('Subscribe link copied'); }
+    catch { toast(url); }
+  };
 }
-$('#btnCloseShare').onclick = () => $('#shareDialog').close();
-$('#btnCopyText').onclick = async () => {
-  try {
-    await navigator.clipboard.writeText($('#shareText').textContent);
-    toast('Copied — paste it anywhere.');
-  } catch {
-    const r = document.createRange();
-    r.selectNode($('#shareText'));
-    getSelection().removeAllRanges();
-    getSelection().addRange(r);
-    toast('Selected — press ⌘C.');
+
+async function loadShares() {
+  const { shares = [] } = await api('/api/shares');
+  const list = $('#sharedList');
+  if (!shares.length) {
+    list.innerHTML = `<div class="empty"><span class="g">🔗</span><b>Nothing shared</b>Share an import and the link shows up here, with a switch to kill it.</div>`;
+    return;
   }
-};
-$('#btnShareIcs').onclick = () => { window.location = `/api/export.ics?batch=${shareBatchId}`; };
-$('#btnSubscribe').onclick = async () => {
-  try {
-    const s = await api('/api/shares', { method: 'POST', body: { batchId: shareBatchId } });
-    const url = `${location.origin}/s/${s.token}.ics`;
-    try {
-      await navigator.clipboard.writeText(url);
-      toast('Subscribe link copied. It updates when you change these dates.');
-    } catch {
-      prompt('Subscribe link — it updates in place when you change these dates:', url);
-    }
-  } catch (e) { toast(e.message); }
-};
-$('#btnShareImage').onclick = () => renderShareImage($('#shareText').textContent);
-
-/** An image of the list is what people actually forward in a group chat. */
-function renderShareImage(text) {
-  const lines = text.split('\n');
-  const pad = 44, lh = 30, width = 900;
-  const canvas = document.createElement('canvas');
-  const scale = 2;
-  canvas.width = width * scale;
-  canvas.height = (pad * 2 + lines.length * lh + 40) * scale;
-  const ctx = canvas.getContext('2d');
-  ctx.scale(scale, scale);
-  ctx.fillStyle = '#fbfaf7';
-  ctx.fillRect(0, 0, width, canvas.height / scale);
-  ctx.fillStyle = '#2f6fd0';
-  ctx.fillRect(0, 0, 6, canvas.height / scale);
-
-  let y = pad + 10;
-  lines.forEach((line, idx) => {
-    const isTitle = idx === 0;
-    const isRule = /^[─-]+$/.test(line.trim());
-    if (isRule) { y += 6; return; }
-    const due = line.startsWith('DUE: ');
-    const indented = line.startsWith('  ');
-    ctx.fillStyle = isTitle ? '#1b1a17' : due ? '#c2620d' : indented ? '#56534c' : '#1b1a17';
-    ctx.font = isTitle
-      ? '700 26px ui-sans-serif, -apple-system, system-ui, sans-serif'
-      : `${indented ? '400 16px' : '600 18px'} ui-sans-serif, -apple-system, system-ui, sans-serif`;
-    ctx.fillText(line.replace(/^ {2}/, '   '), pad, y);
-    y += isTitle ? lh + 8 : lh;
+  list.innerHTML = shares.map((s) => `<div class="card">
+    <h3>${esc(s.label || 'Shared dates')}</h3>
+    <div class="item-meta" style="margin-bottom:10px">
+      <span>opened ${s.fetch_count} time${s.fetch_count === 1 ? '' : 's'}</span>
+      <span>${new Date(s.created_at).toLocaleDateString()}</span>
+    </div>
+    <div class="row">
+      <button class="btn" data-copy="${s.token}" type="button">Copy link</button>
+      <button class="btn ghost" data-revoke="${s.id}" type="button">Stop sharing</button>
+    </div>
+  </div>`).join('');
+  $$('[data-copy]', list).forEach((b) => b.onclick = async () => {
+    const url = `${location.origin}/s/${b.dataset.copy}.ics`;
+    try { await navigator.clipboard.writeText(url); toast('Copied'); } catch { toast(url); }
   });
-  ctx.fillStyle = '#8b877e';
-  ctx.font = '400 13px ui-sans-serif, system-ui, sans-serif';
-  ctx.fillText('Made with KevCal', pad, y + 14);
-
-  canvas.toBlob((blob) => {
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'dates.png';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-    toast('Image saved.');
-  }, 'image/png');
+  $$('[data-revoke]', list).forEach((b) => b.onclick = async () => {
+    await api(`/api/shares/${b.dataset.revoke}/revoke`, { method: 'POST' });
+    toast('Link killed');
+    loadShares();
+  });
 }
 
-// ------------------------------------------------------------------ settings
+// ───────────────────────────────────────────────────────── settings
+
+const READER_SHORT = { gemini: 'Gemini', openai: 'OpenAI', fixture: 'a fixture' };
+const READER_NAME = { gemini: 'Google Gemini', openai: 'OpenAI', fixture: 'Recorded fixture' };
+const READER_HOST = { gemini: 'Google', openai: 'OpenAI' };
 
 async function loadSettings() {
   const s = await api('/api/settings');
   state.settings = s;
+  const h = state.health;
+
+  $('#readerStatus').innerHTML = `
+    <div class="line"><span class="dot ${h.reader_available ? '' : 'warn'}"></span><div>
+      <b>${h.reader_available
+        ? `${READER_NAME[h.reader] || esc(h.reader)}${h.reader_model ? ` — ${esc(h.reader_model)}` : ''}`
+        : 'No reading key yet'}</b><br>
+      <span class="muted">${!h.reader_available
+        ? 'Put GEMINI_API_KEY or OPENAI_API_KEY in a .env file next to the app, then restart it. Until then KevCal falls back to reading on this Mac, which is worse on real documents.'
+        : h.reader === 'fixture'
+          ? 'Test mode: answers come from a recorded file and nothing is uploaded anywhere.'
+          : `The page you import is uploaded to ${READER_HOST[h.reader] || 'the reader'} to be read. Nothing else is.`}</span>
+    </div></div>
+    <div class="line"><span class="dot ${h.ocr ? '' : 'off'}"></span><div>
+      <b>Cross-check</b><br><span class="muted">${h.ocr
+        ? 'Every date is re-read on this Mac and compared. Disagreements get flagged, never silently resolved.'
+        : 'On-device reader not built — run npm run build:tools for the second opinion.'}</span>
+    </div></div>
+    <div class="line"><span class="dot ${h.locked ? '' : 'warn'}"></span><div>
+      <b>${h.locked ? 'Locked' : 'Open to anyone who can reach it'}</b><br>
+      <span class="muted">${h.locked
+        ? 'Requests need your key. Keep using the link you saved to the home screen.'
+        : 'Fine on your own wifi. Set KEVCAL_TOKEN before you put this on a public address.'}</span>
+    </div></div>`;
+
+  $('#tzInput').value = s.timezone || timezone();
   $('#leadDeadline').value = (s.lead_days?.deadline || []).join(', ');
   $('#leadEvent').value = (s.lead_days?.event || []).join(', ');
 
-  const aiOn = s.ai_enabled;
-  $('#privacyText').innerHTML = `Everything is stored on this Mac, in <span class="raw">${esc(s.data_dir)}</span>.
-    There's no account and no sign-in. Deleting an import deletes its original image too.
-    ${aiOn
-      ? '<br><br><strong style="color:var(--due)">AI reading is on</strong> — the image you import is sent to api.anthropic.com to be read. Nothing else leaves this machine.'
-      : '<br><br><strong style="color:var(--good)">Nothing leaves this machine.</strong> Images are read on-device by macOS.'}`;
+  $('#installSteps').innerHTML = [
+    'Open this page in Safari on your phone.',
+    'Tap the Share button, then <b>Add to Home Screen</b>.',
+    'Open it from the icon — it runs full screen, like an app.',
+  ].map((t) => `<li>${t}</li>`).join('');
 
-  $('#aiChip').textContent = aiOn ? 'on' : 'off';
-  $('#aiText').textContent = s.ai_available
-    ? (aiOn
-      ? 'On. Messy layouts are read by Claude, which means the image is sent to Anthropic. Turn it off to stay entirely on-device.'
-      : 'An API key is set, so you can switch this on for harder documents — grids, dense tables, bad handwriting. Off means nothing leaves your Mac.')
-    : 'No API key set, so KevCal reads everything on-device. That works well for letters, posters and most tables. To enable the AI tier, set ANTHROPIC_API_KEY and restart.';
-  const btn = $('#btnToggleAI');
-  btn.hidden = !s.ai_available;
-  btn.textContent = aiOn ? 'Turn off (stay on-device)' : 'Turn on AI reading';
-  btn.onclick = async () => {
-    await api('/api/settings', { method: 'POST', body: { ai_enabled: !aiOn } });
-    loadSettings();
-    updatePill();
-  };
+  $('#shortcutSteps').innerHTML = [
+    'Shortcuts app → <b>+</b> → tap the ⓘ and turn on <b>Show in Share Sheet</b>.',
+    'Add <b>Base64 Encode</b> with the Shortcut Input as its input.',
+    `Add <b>Get contents of URL</b>: <code>${location.origin}/api/quick</code>, method <code>POST</code>, headers <code>Content-Type: application/json</code>, body <b>JSON</b> with <code>data</code> = the Base64 result, <code>filename</code> = <code>photo.jpg</code>, <code>now</code> = Current Date formatted <code>yyyy-MM-dd'T'HH:mm</code>.`,
+    'Add <b>Open URLs</b> with the <code>url</code> value from the response. Name it “KevCal”.',
+  ].map((t) => `<li>${t}</li>`).join('');
 
-  const { anchors } = await api('/api/anchors');
+  const { anchors = [] } = await api('/api/anchors');
   $('#anchorList').innerHTML = anchors.length
-    ? anchors.map((a) => `${esc(a.name)} — week 1 begins ${esc(a.week1_start)}${a.is_default ? ' (default)' : ''}`).join('<br>')
-    : 'No terms saved yet.';
+    ? `Saved: ${anchors.map((a) => `${esc(a.name)} (week 1 from ${a.week1_start})`).join(', ')}`
+    : '';
 }
 
-$('#btnSaveLeads').onclick = async () => {
-  const parse = (v) => v.split(',').map((n) => parseInt(n.trim(), 10)).filter((n) => Number.isFinite(n));
-  await api('/api/settings', { method: 'POST', body: {
-    lead_days: { deadline: parse($('#leadDeadline').value), event: parse($('#leadEvent').value) },
-  } });
-  toast('Saved.');
-};
+$('#btnTzDetect').addEventListener('click', () => { $('#tzInput').value = timezone(); });
 
-$('#btnSaveAnchor').onclick = async () => {
+$('#btnSaveLeads').addEventListener('click', async () => {
+  const parse = (v) => v.split(/[,\s]+/).map(Number).filter((n) => Number.isInteger(n) && n >= 0);
+  await api('/api/settings', {
+    method: 'POST',
+    body: {
+      lead_days: { deadline: parse($('#leadDeadline').value), event: parse($('#leadEvent').value) },
+      timezone: $('#tzInput').value.trim(),
+    },
+  });
+  toast('Saved');
+});
+
+$('#btnSaveAnchor').addEventListener('click', async () => {
   const week1 = $('#anchorStart').value;
-  if (!week1) return toast('Pick the Monday that week 1 starts.');
-  await api('/api/anchors', { method: 'POST', body: {
-    name: $('#anchorName').value || 'Term',
-    week1_start: week1,
-    skip_weeks: $('#anchorSkips').value.split(',').map((s) => s.trim()).filter(Boolean),
-    is_default: true,
-  } });
-  toast('Term saved — “Wk 7 (Fri)” will resolve now.');
+  if (!week1) return toast('Pick the Monday week 1 starts');
+  await api('/api/anchors', {
+    method: 'POST',
+    body: { name: $('#anchorName').value.trim() || 'Term', week1_start: week1, is_default: true },
+  });
+  toast('Term saved');
   loadSettings();
-};
+});
 
-async function updatePill() {
-  try {
-    const h = await api('/api/health');
-    const pill = $('#privacyPill');
-    const cloud = h.ai_enabled && h.ai_key_present;
-    pill.textContent = cloud ? 'AI reading on' : 'on-device';
-    pill.className = `pill ${cloud ? 'cloud' : 'local'}`;
-    pill.title = cloud
-      ? 'Imported images are sent to Anthropic to be read.'
-      : 'Images are read on your Mac. Nothing leaves it.';
-  } catch { /* server not up yet */ }
+// ───────────────────────────────────────────────────────── boot
+
+$$('[data-close]').forEach((el) => el.addEventListener('click', () => closeOverlay(el.closest('.sheet-wrap'))));
+window.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const open = $$('.overlay:not([hidden]), .sheet-wrap:not([hidden])').pop();
+  if (open) closeOverlay(open);
+});
+window.addEventListener('scroll', () => {
+  $('#topbar').classList.toggle('stuck', window.scrollY > 4);
+}, { passive: true });
+
+$('#readerChip').addEventListener('click', () => go('settings'));
+
+async function boot() {
+  state.health = await api('/api/health');
+  const chip = $('#readerChip');
+  if (state.health.reader_available) {
+    chip.textContent = `read by ${READER_SHORT[state.health.reader] || state.health.reader}`;
+    chip.classList.add('cloud');
+  } else {
+    chip.textContent = 'on-device only';
+    chip.classList.add('warn');
+  }
+
+  // Arriving from the share-sheet Shortcut: go straight to what it found.
+  const params = new URLSearchParams(location.search);
+  const tab = params.get('tab');
+  const b = params.get('b');
+  if (b) {
+    history.replaceState({}, '', location.pathname);
+    const res = await api(`/api/batches/${b}`);
+    if (!res.error) { state.lastResponse = {}; showReview(res); }
+  }
+  go(['dates', 'imports', 'shared', 'settings'].includes(tab) ? tab : 'dates');
 }
 
-updatePill();
+boot();

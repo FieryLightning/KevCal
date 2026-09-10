@@ -1,24 +1,37 @@
-// KevCal server. Local-first by design: it binds to your machine, stores
-// everything under ./data, and makes no outbound request unless you switch on
-// the optional AI tier.
+// KevCal server.
+//
+// v1 bound to the LAN and assumed the Mac would be awake on the same wifi when
+// the letter was in your hand. That assumption was the riskiest part of the
+// whole design and it is the one that failed, so v2 is built to sit behind a
+// tunnel and be reachable from anywhere — which means it now needs a lock on
+// the door. Set KEVCAL_TOKEN and every request must carry it.
 
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
-import { ROOT, DATA_DIR, getSetting } from './db.js';
-import { json, notFound, badRequest, serveFile, safeJoin } from './lib/http.js';
-import { ocrAvailable } from './extract/index.js';
-import { aiAvailable } from './extract/anthropic.js';
-import * as api from './api.js';
+import { fileURLToPath } from 'node:url';
+import { loadEnv } from './lib/env.js';
+
+// Before anything reads process.env.
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const REPO = path.resolve(HERE, '..');
+loadEnv(path.join(REPO, '.env'));
+
+const { ROOT, DATA_DIR, getSetting } = await import('./db.js');
+const { json, notFound, serveFile, safeJoin, send } = await import('./lib/http.js');
+const { ocrAvailable, readerAvailable, readerName, readerModel } = await import('./extract/index.js');
+const api = await import('./api.js');
 
 const PORT = Number(process.env.KEVCAL_PORT || process.env.PORT || 4321);
 const HOST = process.env.KEVCAL_HOST || '0.0.0.0';
+const TOKEN = process.env.KEVCAL_TOKEN || null;
 const PUBLIC_DIR = path.join(ROOT, 'public');
 
 /** Route table: [method, pattern, handler]. `:param` captures a segment. */
 const routes = [
   ['POST',   '/api/capture',                 (req, res) => api.captureHandler(req, res)],
+  ['POST',   '/api/quick',                   (req, res) => api.quickCapture(req, res)],
   ['GET',    '/api/batches',                 (req, res) => api.listBatches(req, res)],
   ['GET',    '/api/batches/:id',             (req, res, p) => api.getBatchHandler(req, res, p.id)],
   ['POST',   '/api/batches/:id/commit',      (req, res, p) => api.commitBatch(req, res, p.id)],
@@ -44,9 +57,11 @@ const routes = [
   ['GET',    '/api/stats',                   (req, res) => api.stats(req, res)],
   ['GET',    '/api/health',                  (req, res) => json(res, 200, {
     ok: true,
+    reader: readerAvailable() ? readerName() : (ocrAvailable() ? 'on-device' : 'text-only'),
+    reader_available: readerAvailable(),
+    reader_model: readerModel(),
     ocr: ocrAvailable(),
-    ai_key_present: aiAvailable(),
-    ai_enabled: getSetting('ai_enabled', false),
+    locked: Boolean(TOKEN),
     data_dir: DATA_DIR,
   })],
 ];
@@ -54,16 +69,10 @@ const routes = [
 const MUTATING = new Set(['POST', 'PATCH', 'PUT', 'DELETE']);
 
 /**
- * KevCal binds to the LAN so a phone can reach it, which also means any page in
- * any browser on that network can send it requests. Two cheap checks close the
- * cross-site hole without breaking the app's own fetches:
- *
- *  - a mutating API call must declare `application/json`, which a cross-origin
- *    form or `text/plain` POST cannot do without triggering a preflight;
- *  - if an Origin header is present it must match the host being addressed.
- *
- * Without this, any site the user visits could flip on AI uploading, delete
- * their imports, or publish a share link.
+ * Two cheap checks close the cross-site hole without breaking the app's own
+ * fetches: a mutating API call must declare application/json, and a present
+ * Origin must match the host being addressed. Without this, any page in any
+ * browser could delete your imports or publish a share link.
  */
 function crossSiteRejected(req, res, pathname) {
   if (!MUTATING.has(req.method)) return false;
@@ -79,8 +88,6 @@ function crossSiteRejected(req, res, pathname) {
     }
   }
 
-  // Only meaningful when there is a body to mis-declare; commit and undo are
-  // bodyless POSTs and are covered by the Origin check above.
   const hasBody = Number(req.headers['content-length'] || 0) > 0 || !!req.headers['transfer-encoding'];
   if (hasBody) {
     const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
@@ -89,6 +96,57 @@ function crossSiteRejected(req, res, pathname) {
       return true;
     }
   }
+  return false;
+}
+
+function cookies(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+  }
+  return out;
+}
+
+/** Constant-time-ish compare so the token cannot be guessed a character at a time. */
+function sameToken(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+const LOCK_PAGE = `<!doctype html><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KevCal</title>
+<style>
+  body{font:16px/1.5 -apple-system,system-ui,sans-serif;margin:0;display:grid;place-items:center;
+       min-height:100vh;background:#12121a;color:#e9e9f0;text-align:center;padding:24px}
+  .k{font-size:44px;margin-bottom:8px}
+  p{opacity:.65;max-width:30ch}
+</style>
+<div><div class="k">🔒</div><h1>KevCal</h1>
+<p>Add your key to the address to get in — the link on your phone's home screen already has it.</p></div>`;
+
+/**
+ * A bearer token in a cookie. Not an identity system and not pretending to be:
+ * it is the difference between "anyone who finds the tunnel URL can read your
+ * children's school letters" and "you need the link you saved".
+ */
+function unlocked(req, res, url) {
+  if (!TOKEN) return true;
+  const supplied = url.searchParams.get('k')
+    || req.headers['x-kevcal-token']
+    || cookies(req).kc_token;
+  if (sameToken(supplied || '', TOKEN)) {
+    if (url.searchParams.get('k')) {
+      res.setHeader('set-cookie',
+        `kc_token=${encodeURIComponent(TOKEN)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax`);
+    }
+    return true;
+  }
+  if (url.pathname.startsWith('/api/')) json(res, 401, { error: 'unauthorised' });
+  else send(res, 401, LOCK_PAGE, { 'content-type': 'text/html; charset=utf-8' });
   return false;
 }
 
@@ -114,13 +172,15 @@ const server = http.createServer(async (req, res) => {
   const pathname = decodeURIComponent(url.pathname);
 
   try {
-    // Shared lists: /s/<token> reads as JSON, /s/<token>.ics subscribes.
+    // Shared lists carry their own unguessable token and are deliberately public;
+    // that is the entire point of sharing one.
     if (pathname.startsWith('/s/')) {
       const raw = pathname.slice(3);
       const isICS = raw.endsWith('.ics');
       return api.serveShare(req, res, isICS ? raw.slice(0, -4) : raw, isICS);
     }
 
+    if (!unlocked(req, res, url)) return;
     if (crossSiteRejected(req, res, pathname)) return;
 
     const route = matchRoute(req.method, pathname);
@@ -132,7 +192,6 @@ const server = http.createServer(async (req, res) => {
       if (file && fs.existsSync(file) && fs.statSync(file).isFile()) {
         return serveFile(res, file, { cache: 'no-cache' });
       }
-      // Unknown GET falls through to the app shell so deep links work.
       const shell = path.join(PUBLIC_DIR, 'index.html');
       if (fs.existsSync(shell)) return serveFile(res, shell, { cache: 'no-cache' });
     }
@@ -156,18 +215,24 @@ function lanAddresses() {
 }
 
 server.listen(PORT, HOST, () => {
-  const ai = aiAvailable();
+  const suffix = TOKEN ? `/?k=${TOKEN}` : '';
   console.log('');
   console.log('  KevCal');
   console.log('  ──────');
-  console.log(`  On this Mac   http://localhost:${PORT}`);
+  console.log(`  On this Mac    http://localhost:${PORT}${suffix}`);
   for (const addr of lanAddresses()) {
-    console.log(`  On your phone http://${addr}:${PORT}   (same wifi)`);
+    console.log(`  On your phone  http://${addr}:${PORT}${suffix}   (same wifi)`);
   }
   console.log('');
-  console.log(`  Data          ${DATA_DIR}`);
-  console.log(`  Reading       ${ocrAvailable() ? 'on-device (Apple Vision) + date grammar' : 'TEXT ONLY — run: npm run build:tools'}`);
-  console.log(`  AI tier       ${ai ? (getSetting('ai_enabled', false) ? 'ON — images are sent to api.anthropic.com' : 'available but OFF') : 'no API key set (not needed)'}`);
-  console.log(`  Outbound      ${ai && getSetting('ai_enabled', false) ? 'api.anthropic.com only, when you import' : 'nothing leaves this machine'}`);
+  const READER_LABEL = { gemini: 'Google Gemini', openai: 'OpenAI' };
+  const reading = !readerAvailable()
+    ? 'NO API KEY — falling back to on-device reading. Put GEMINI_API_KEY or OPENAI_API_KEY in .env'
+    : readerName() === 'fixture'
+      ? 'a recorded fixture (test mode) — nothing is uploaded anywhere'
+      : `${READER_LABEL[readerName()] || readerName()} (${readerModel() || '—'}) — pages are uploaded to read them`;
+  console.log(`  Reading        ${reading}`);
+  console.log(`  Cross-check    ${ocrAvailable() ? 'on-device OCR + date grammar' : 'date grammar only (run: npm run build:tools)'}`);
+  console.log(`  Door           ${TOKEN ? 'locked — the link needs ?k=…' : 'OPEN — set KEVCAL_TOKEN before putting this on a tunnel'}`);
+  console.log(`  Data           ${DATA_DIR}`);
   console.log('');
 });

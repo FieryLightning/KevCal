@@ -1,5 +1,11 @@
 # Decisions made while you were asleep
 
+> **v2 note.** D1 (LAN-only), D5 (no API key, on-device default) and D11 (zero
+> dependencies for the reader) were all reversed deliberately — see PROGRESS.md
+> for what replaced them and why. Everything else below still holds.
+
+---
+
 You said: *"make choices for me, if needed. pick easy and safe options"* and
 *"use agents for my role."* So these were decided by a product-owner proxy
 briefed on your original message plus the four persona interviews.

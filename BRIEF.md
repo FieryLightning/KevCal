@@ -1,5 +1,14 @@
 # KevCal
 
+> **v2 note.** The research and the twelve rules below still stand. What changed
+> is the engine and the platform: Gemini now reads the page and the deterministic
+> grammar became the cross-check, and KevCal is built to sit behind a tunnel
+> rather than assume the Mac is awake on the same wifi. Open question 1 ("will
+> the capture moment happen?") is answered by the iOS share-sheet Shortcut.
+> See README.md and PROGRESS.md.
+
+---
+
 **One line:** KevCal turns a photo, screenshot or PDF of anything with dates on it
 into calendar entries — showing you where each one came from, and undoing the
 whole import with one button.

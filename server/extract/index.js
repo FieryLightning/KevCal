@@ -1,23 +1,32 @@
-// Extraction orchestrator: chooses an engine, normalises the result, and scores
-// the batch's risk so the UI knows whether to show a confirm card or a review table.
+// Orchestrator. Decides who reads the document, then hands everything to the
+// checker before anyone downstream sees it.
+//
+// Order of preference:
+//   1. Gemini reads the page, the on-device OCR runs alongside it purely to
+//      supply pixel-accurate geometry for the "where did this come from" overlay.
+//   2. If there is no key, or the call fails, the deterministic grammar reads it
+//      instead. Degraded, but the app still works with the wifi off.
+//
+// Nothing here resolves a date. That is verify.js's job, and keeping it in one
+// place is what makes the "never guess" promise checkable.
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { buildItems, fingerprint } from './build.js';
-import { extractWithAI, aiAvailable } from './anthropic.js';
+import { readDocument, readerAvailable, readerName, readerModel } from './reader.js';
+import { verifyItems } from './verify.js';
 import { ROOT } from '../db.js';
-import { today } from '../lib/dates.js';
+import { today, daysBetween, formatHuman, addDays } from '../lib/dates.js';
 
 const OCR_BIN = path.join(ROOT, 'bin', 'kevcal-ocr');
 
 export function ocrAvailable() { return fs.existsSync(OCR_BIN); }
+export { readerAvailable, readerName, readerModel };
 
 export function runOCR(filePath, { fast = false } = {}) {
   return new Promise((resolve) => {
-    if (!ocrAvailable()) {
-      return resolve({ ok: false, pages: [], error: 'ocr_not_built' });
-    }
+    if (!ocrAvailable()) return resolve({ ok: false, pages: [], error: 'ocr_not_built' });
     const args = [filePath];
     if (fast) args.push('--fast');
     const proc = spawn(OCR_BIN, args);
@@ -26,12 +35,8 @@ export function runOCR(filePath, { fast = false } = {}) {
     proc.stderr.on('data', (d) => { err += d; });
     proc.on('error', (e) => resolve({ ok: false, pages: [], error: e.message }));
     proc.on('close', () => {
-      try {
-        const parsed = JSON.parse(out);
-        resolve(parsed);
-      } catch {
-        resolve({ ok: false, pages: [], error: err.slice(0, 300) || 'ocr_bad_output' });
-      }
+      try { resolve(JSON.parse(out)); }
+      catch { resolve({ ok: false, pages: [], error: err.slice(0, 300) || 'ocr_bad_output' }); }
     });
   });
 }
@@ -50,30 +55,31 @@ export function linesFromText(text) {
 }
 
 /**
- * Risk decides the ceremony (R4). Low risk earns the three-tap path; anything
- * uncertain, bulky, or bound for a shared destination gets the review table.
+ * Risk decides the ceremony. One clear poster date earns the three-tap path;
+ * anything the checker flagged gets the full review, and anything it blocked
+ * cannot leave review at all.
  */
-export function assessRisk(items, { destinationShared = false } = {}) {
-  if (destinationShared) return 'high';
+export function assessRisk(items) {
   if (!items.length) return 'low';
-  const minConf = Math.min(...items.map((i) => i.confidence ?? 0));
-  const anyReview = items.some((i) => i.needs_review);
-  if (anyReview || items.length > 3 || minConf < 0.8) return 'high';
+  if (items.some((i) => i.blocked)) return 'blocked';
+  if (items.some((i) => i.needs_review) || items.length > 3) return 'high';
+  if (Math.min(...items.map((i) => i.confidence ?? 0)) < 0.8) return 'high';
   return 'low';
 }
 
-/** Attach OCR geometry to an AI-produced item by locating its verbatim quote. */
+/** Locate a verbatim quote among OCR lines, to borrow its exact geometry. */
 function locateQuote(quote, lines) {
-  if (!quote) return null;
-  const norm = (s) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!quote || !lines.length) return null;
+  const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
   const q = norm(quote);
+  if (!q) return null;
   let best = null, bestScore = 0;
   for (const line of lines) {
     const l = norm(line.text);
     if (!l) continue;
-    let score = 0;
+    let score;
     if (l === q) score = 1;
-    else if (l.includes(q) || q.includes(l)) score = 0.8;
+    else if (l.includes(q) || q.includes(l)) score = 0.85;
     else {
       const qt = new Set(q.split(' '));
       const lt = new Set(l.split(' '));
@@ -83,110 +89,233 @@ function locateQuote(quote, lines) {
     }
     if (score > bestScore) { bestScore = score; best = line; }
   }
-  return bestScore >= 0.45 ? best : null;
-}
-
-function normaliseAIItems(aiItems, lines) {
-  return aiItems.map((a) => {
-    const line = locateQuote(a.source_text, lines);
-    const item = {
-      kind: a.kind === 'deadline' ? 'deadline' : 'event',
-      title: (a.title || '(untitled)').trim(),
-      start_date: a.start_date || null,
-      start_time: a.start_time || null,
-      end_date: a.end_date || null,
-      end_time: a.end_time || null,
-      all_day: a.start_time ? 0 : 1,
-      location: a.location || null,
-      owner: a.owner || null,
-      cost: a.cost || null,
-      notes: a.notes || null,
-      confidence: typeof a.confidence === 'number' ? Math.max(0.05, Math.min(0.99, a.confidence)) : 0.6,
-      recurrence_suggestion: a.repeats_hint
-        ? JSON.stringify({ phrase: a.repeats_hint, accepted: false, freq: null, interval: null, byday: null })
-        : null,
-      recurrence_accepted: 0,
-      rrule: null,
-      satisfied: 0,
-      question: a.unresolved || null,
-      heading: null,
-      src_page: line?.page ?? 1,
-      src_bbox: line?.bbox ? JSON.stringify(line.bbox) : null,
-      src_raw: a.source_text || null,
-      src_interpretation: a.interpretation || null,
-    };
-    item.needs_review = (!item.start_date || item.confidence < 0.75 || a.unresolved) ? 1 : 0;
-    item.fingerprint = fingerprint(item);
-    return item;
-  });
+  return bestScore >= 0.5 ? best : null;
 }
 
 /**
- * @param {{kind:'image'|'pdf'|'text', filePath?, text?, filename?, anchor?, useAI?, reference?}} opts
+ * Union of the OCR lines that make up a quote spanning more than one line, so a
+ * table row highlights as a row rather than as its first word.
+ */
+function unionBox(quote, lines) {
+  const norm = (s) => String(s).toLowerCase().replace(/\s+/g, ' ').trim();
+  const q = norm(quote);
+  if (q.length < 8) return null;
+  const parts = lines.filter((l) => {
+    const t = norm(l.text);
+    return t.length > 2 && q.includes(t);
+  });
+  if (parts.length < 2) return null;
+  const boxes = parts.map((p) => p.bbox).filter((b) => Array.isArray(b) && b.length === 4);
+  if (boxes.length < 2) return null;
+  const x0 = Math.min(...boxes.map((b) => b[0]));
+  const y0 = Math.min(...boxes.map((b) => b[1]));
+  const x1 = Math.max(...boxes.map((b) => b[0] + b[2]));
+  const y1 = Math.max(...boxes.map((b) => b[1] + b[3]));
+  return { bbox: [x0, y0, x1 - x0, y1 - y0], page: parts[0].page ?? 1 };
+}
+
+/** Give each item the best geometry available: OCR first, the model's box second. */
+function attachGeometry(items, lines) {
+  if (!lines.length) return items;
+  for (const item of items) {
+    const merged = unionBox(item.src_raw, lines);
+    if (merged) {
+      item.src_bbox = JSON.stringify(merged.bbox);
+      item.src_page = merged.page;
+      continue;
+    }
+    const line = locateQuote(item.src_raw, lines);
+    if (line?.bbox) {
+      item.src_bbox = JSON.stringify(line.bbox);
+      item.src_page = line.page ?? item.src_page ?? 1;
+    }
+  }
+  return items;
+}
+
+/**
+ * The grammar path produces items that are already resolved, so they get the
+ * plausibility half of the checker rather than the whole of it.
+ */
+function annotateBuiltItems(items, ctx) {
+  for (const item of items) {
+    const flags = [];
+    if (!item.start_date) {
+      flags.push({
+        code: 'no_date', level: 'blocker', options: [],
+        message: item.question || 'I couldn\'t work out a date for this one. Add it, or drop it.',
+      });
+    } else {
+      const delta = daysBetween(ctx.now.date, item.start_date);
+      if (delta < -1) {
+        flags.push({
+          code: 'in_the_past', level: 'check', options: [],
+          message: `That's ${Math.abs(delta)} day${Math.abs(delta) === 1 ? '' : 's'} ago — already gone.`,
+        });
+      } else if (delta > 550) {
+        flags.push({
+          code: 'far_future', level: 'check', options: [],
+          message: `That's ${Math.round(delta / 365 * 10) / 10} years away — worth checking the year.`,
+        });
+      }
+      if (item.question) {
+        flags.push({ code: 'reader_unsure', level: 'check', message: item.question, options: [] });
+      }
+    }
+    if ((item.confidence ?? 1) < 0.7 && !flags.length) {
+      flags.push({
+        code: 'low_confidence', level: 'check', options: [],
+        message: 'The page was hard to read here — worth a glance before you keep it.',
+      });
+    }
+    item.flags = flags;
+    item.blocked = flags.some((f) => f.level === 'blocker') ? 1 : 0;
+    item.needs_review = flags.length ? 1 : (item.needs_review ?? 0);
+    item.date_basis = item.date_basis || 'grammar';
+  }
+  return items;
+}
+
+/**
+ * A title repeated across a lot of dates almost always means the page was a
+ * table and the columns did not line up — every row ends up labelled with the
+ * page header instead of its own text. It is the single most common way a
+ * document import turns into confident junk, and no per-item check can see it,
+ * because each item on its own looks fine.
+ */
+function flagRepeatedTitles(items) {
+  const counts = new Map();
+  for (const i of items) {
+    const key = String(i.title || '').trim().toLowerCase();
+    if (!key || key === '(untitled)') continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  for (const i of items) {
+    const n = counts.get(String(i.title || '').trim().toLowerCase()) || 0;
+    if (n < 4) continue;
+    i.flags = [...(i.flags || []), {
+      code: 'repeated_title',
+      level: 'check',
+      options: [],
+      message: `${n} dates came out with this same title, which usually means the columns didn't line up. Worth a look before you keep them.`,
+    }];
+    i.needs_review = 1;
+  }
+  return items;
+}
+
+/**
+ * Build the clock the checker reasons against. It has to be the PHONE's clock,
+ * not the server's: "tomorrow" and the after-midnight ambiguity are both
+ * questions about where the user is standing in the day.
+ */
+export function clockFrom({ now, tz } = {}) {
+  const raw = typeof now === 'string' ? now.trim() : '';
+  const m = raw.match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
+  if (m) {
+    return { date: m[1], time: m[2] || '12:00', hour: m[2] ? Number(m[2].slice(0, 2)) : 12, tz: tz || null };
+  }
+  const d = new Date();
+  return {
+    date: today(),
+    time: `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`,
+    hour: d.getHours(),
+    tz: tz || Intl.DateTimeFormat().resolvedOptions().timeZone || null,
+  };
+}
+
+/**
+ * @param {{kind:'image'|'pdf'|'text', filePath?, text?, filename?, anchor?, now?, tz?, takenAt?}} opts
  */
 export async function extract(opts) {
-  const reference = opts.reference || today();
-  const wantAI = Boolean(opts.useAI) && aiAvailable();
+  const now = clockFrom(opts);
+  const reference = now.date;
+  const engineParts = [];
+  let ocrError = null;
+  let readerError = null;
+
+  // Read the page and OCR it at the same time; the OCR is cheap, local, and only
+  // ever used for geometry and as the safety net.
+  const ocrPromise = (opts.kind !== 'text' && opts.filePath && ocrAvailable())
+    ? runOCR(opts.filePath)
+    : Promise.resolve(null);
+
+  let base64 = null;
+  if (opts.filePath) {
+    try { base64 = fs.readFileSync(opts.filePath).toString('base64'); } catch { /* handled below */ }
+  }
+
+  const useReader = readerAvailable() && (opts.kind === 'text' ? Boolean(opts.text) : Boolean(base64));
+  const readerPromise = useReader
+    ? readDocument({ base64, filename: opts.filename, isPdf: opts.kind === 'pdf', text: opts.kind === 'text' ? opts.text : null })
+    : Promise.resolve(null);
+
+  const [ocr, ai] = await Promise.all([ocrPromise, readerPromise]);
 
   let lines = [];
   let page = { width: null, height: null };
-  let engineParts = [];
-  let ocrError = null;
-
   if (opts.kind === 'text') {
     lines = linesFromText(opts.text);
-    engineParts.push('text');
+  } else if (ocr?.ok) {
+    lines = ocr.pages.flatMap((p) => p.lines.map((l) => ({ ...l, page: p.page })));
+    page = { width: ocr.pages[0]?.width ?? null, height: ocr.pages[0]?.height ?? null };
+  } else if (ocr) {
+    ocrError = ocr.error || 'ocr_failed';
+  }
+
+  let items = [];
+  let doc = {};
+  let questions = [];
+  let stats = {};
+  let anchorUsed = null;
+
+  if (ai?.ok) {
+    doc = ai.doc || {};
+    const ctx = {
+      now,
+      tz: opts.tz || now.tz,
+      documentDate: /^\d{4}-\d{2}-\d{2}$/.test(doc.document_date || '') ? doc.document_date : null,
+      documentSpan: doc.document_span || null,
+      photoDate: /^\d{4}-\d{2}-\d{2}$/.test(opts.takenAt || '') ? opts.takenAt : null,
+    };
+    items = verifyItems(ai.items || [], ctx);
+    attachGeometry(items, lines);
+    engineParts.push(ai.model || readerName());
+    if (lines.length) engineParts.push(ocr?.engine || 'vision');
+    engineParts.push('checked');
   } else {
-    const ocr = await runOCR(opts.filePath);
-    if (ocr.ok) {
-      lines = ocr.pages.flatMap((p) => p.lines.map((l) => ({ ...l, page: p.page })));
-      page = { width: ocr.pages[0]?.width ?? null, height: ocr.pages[0]?.height ?? null };
-      // Report what actually read it: 'pdf-text' means the PDF's own text layer.
-      engineParts.push(ocr.engine || 'vision');
-    } else {
-      ocrError = ocr.error || 'ocr_failed';
+    if (ai && !ai.ok) readerError = ai.detail ? `${ai.error}: ${ai.detail}` : ai.error;
+    if (lines.length) {
+      const built = buildItems(lines, { reference, anchor: opts.anchor });
+      items = annotateBuiltItems(built.items, { now });
+      questions = built.questions || [];
+      stats = built.stats || {};
+      anchorUsed = built.anchor || null;
+      engineParts.push(ocr?.engine || (opts.kind === 'text' ? 'text' : 'vision'), 'grammar');
+    } else if (opts.kind !== 'text') {
+      engineParts.push('none');
     }
   }
 
-  let built = { items: [], anchor: null, questions: [], stats: {} };
-  if (lines.length) {
-    built = buildItems(lines, { reference, anchor: opts.anchor });
-    engineParts.push('grammar');
-  }
+  flagRepeatedTitles(items);
+  for (const item of items) item.fingerprint = fingerprint(item);
 
-  let aiError = null;
-  if (wantAI) {
-    let base64 = null;
-    if (opts.filePath) {
-      try { base64 = fs.readFileSync(opts.filePath).toString('base64'); } catch { /* ignore */ }
-    }
-    const ai = await extractWithAI({
-      base64,
-      filename: opts.filename,
-      isPdf: opts.kind === 'pdf',
-      text: opts.kind === 'text' ? opts.text : null,
-      reference,
-    });
-    if (ai.ok && ai.items.length) {
-      built.items = normaliseAIItems(ai.items, lines);
-      engineParts.push('ai');
-    } else if (!ai.ok) {
-      aiError = ai.error;
-    }
-  }
-
-  const risk = assessRisk(built.items);
   return {
     lines,
     page,
-    items: built.items,
-    anchor: built.anchor,
-    questions: built.questions,
-    stats: built.stats,
-    risk,
+    items,
+    doc,
+    anchor: anchorUsed,
+    questions,
+    stats,
+    risk: assessRisk(items),
     engine: engineParts.join('+') || 'none',
+    now,
     ocrError,
-    aiError,
-    aiAvailable: aiAvailable(),
+    readerError,
+    readerAvailable: readerAvailable(),
+    usedReader: Boolean(ai?.ok),
   };
 }
+
+export { formatHuman, addDays };
