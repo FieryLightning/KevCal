@@ -5,7 +5,7 @@
 // moment, on a real document, on a phone, in a corridor. So `fetch` is stubbed
 // and the exact bytes each reader would send are inspected here.
 
-import { SCHEMA, toStrict } from '../server/extract/contract.js';
+import { SCHEMA, toStrict, redactSecrets } from '../server/extract/contract.js';
 
 let passed = 0, failed = 0;
 const failures = [];
@@ -62,6 +62,24 @@ group('the schema OpenAI strict mode requires');
     JSON.stringify(SCHEMA.required));
 }
 
+group('a key never reaches the user, whatever the provider says back');
+{
+  process.env.OPENAI_API_KEY = 'sk-proj-SUPERSECRETVALUE123';
+  const real = redactSecrets('Incorrect API key provided: sk-proj-SUPERSECRETVALUE123. Check your keys.');
+  check('the live key is stripped verbatim', !real.includes('SUPERSECRETVALUE123'), real);
+  check('and the rest of the message survives', /Incorrect API key provided/.test(real) && /Check your keys/.test(real), real);
+
+  check('an OpenAI-shaped key it has never seen is stripped',
+    !redactSecrets('bad key sk-abc123def456ghi').includes('sk-abc123def456ghi'));
+  check('a Google-shaped key is stripped',
+    !redactSecrets('key AIzaSyC7xQ_notarealkey12345').includes('AIzaSyC7xQ_notarealkey12345'));
+  check('a bearer header is stripped',
+    !redactSecrets('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9').includes('eyJhbGciOiJIUzI1NiJ9'));
+  check('ordinary error text is left alone',
+    redactSecrets('model not found: gemini-9-flash') === 'model not found: gemini-9-flash');
+  check('empty input is safe', redactSecrets(null) === '' && redactSecrets(undefined) === '');
+}
+
 // ─────────────────────────────────────────────── OpenAI
 
 group('OpenAI reader');
@@ -95,6 +113,20 @@ group('OpenAI reader');
   const file = sent.body.input[0].content.find((p) => p.type === 'input_file');
   check('a PDF goes as input_file with its name', file?.filename === 'term.pdf');
   check('and a data URL of its own type', file?.file_data === 'data:application/pdf;base64,QUJD');
+
+  // The 401 that quotes your key back at you, which is shown in the app.
+  process.env.OPENAI_API_KEY = 'sk-proj-LIVEKEY9876543210';
+  globalThis.fetch = async () => ({
+    ok: false, status: 401,
+    text: async () => 'Incorrect API key provided: sk-proj-LIVEKEY9876543210 (also seen: sk-test). Check your keys.',
+  });
+  const unauthorised = await openai.read(IMAGE);
+  check('a 401 that echoes the live key is redacted before it can be displayed',
+    !unauthorised.detail.includes('LIVEKEY9876543210'), unauthorised.detail);
+  check('and a short key-shaped token in the same body goes too',
+    !unauthorised.detail.includes('sk-test'), unauthorised.detail);
+  check('the reason still reaches the user', /Incorrect API key provided/.test(unauthorised.detail), unauthorised.detail);
+  process.env.OPENAI_API_KEY = 'sk-test';
 
   stubFetch({ output: [{ type: 'message', content: [{ type: 'refusal', refusal: 'no' }] }] });
   const refused = await openai.read(IMAGE);

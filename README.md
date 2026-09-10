@@ -151,6 +151,23 @@ token, not an account system — treat the link like a password.
 
 ---
 
+## Your API key
+
+It lives in `.env`, which is git-ignored and never leaves this machine. It is
+read into one outbound request header and nothing else: it is not logged, not
+returned by any endpoint, and not inside the directory the web server can serve.
+Provider error messages are redacted before they are displayed, because some of
+them quote your key back at you.
+
+Two things worth doing anyway, because a leaked key is a billing problem rather
+than a privacy one:
+
+- `chmod 600 .env` so other accounts on this Mac cannot read it.
+- Set a **spend limit** in the provider's console. That is the real backstop —
+  it caps the damage if a key ever escapes, and neither provider sets one for you.
+
+Rotate the key if you ever paste a terminal transcript somewhere public.
+
 ## Where your things go
 
 Everything lives in `./data` on your own machine: a SQLite file and the original

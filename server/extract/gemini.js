@@ -5,7 +5,7 @@
 // is what draws the highlight on your photo without needing the on-device OCR to
 // find the line first.
 
-import { SYSTEM, SCHEMA, USER_PROMPT, shapeResult, parseJSONLoosely, mediaTypeFor } from './contract.js';
+import { SYSTEM, SCHEMA, USER_PROMPT, shapeResult, parseJSONLoosely, mediaTypeFor, redactSecrets } from './contract.js';
 
 const URL = 'https://generativelanguage.googleapis.com/v1beta/interactions';
 
@@ -48,7 +48,7 @@ async function callOnce(name, parts, signal) {
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    return { ok: false, status: res.status, error: `http_${res.status}`, detail: detail.slice(0, 400) };
+    return { ok: false, status: res.status, error: `http_${res.status}`, detail: redactSecrets(detail).slice(0, 400) };
   }
   return { ok: true, body: await res.json() };
 }
@@ -78,7 +78,7 @@ export async function read(input) {
         attempt = await callOnce(name, parts, controller.signal);
       } catch (e) {
         if (e.name === 'AbortError') return { ok: false, error: 'timeout' };
-        return { ok: false, error: 'network', detail: e.message };
+        return { ok: false, error: 'network', detail: redactSecrets(e.message) };
       }
       if (attempt.ok) {
         const parsed = parseJSONLoosely(outputTextOf(attempt.body));

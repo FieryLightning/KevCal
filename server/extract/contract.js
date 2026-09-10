@@ -150,6 +150,27 @@ export function parseJSONLoosely(text) {
   return null;
 }
 
+/**
+ * Provider error bodies are shown to the user in the app, and some of them
+ * quote your key back at you — OpenAI's 401 reads "Incorrect API key provided:
+ * sk-proj-…". Nothing credential-shaped should reach a browser tab, a
+ * screenshot, or a KevCal instance sitting on a public tunnel.
+ *
+ * The pattern list catches the common shapes; the loop at the end is the real
+ * guarantee, because it removes the live key whatever shape it happens to be.
+ */
+export function redactSecrets(text) {
+  let s = String(text ?? '');
+  s = s.replace(/\b(?:sk|rk)-[A-Za-z0-9_-]{3,}/g, '[redacted]');
+  s = s.replace(/\bAIza[A-Za-z0-9_-]{10,}/g, '[redacted]');
+  s = s.replace(/\b(bearer\s+)[A-Za-z0-9._-]{8,}/gi, '$1[redacted]');
+  s = s.replace(/((?:api[_-]?key|access[_-]?token|authorization)["'\s:=]{1,4})[A-Za-z0-9._-]{12,}/gi, '$1[redacted]');
+  for (const secret of [process.env.OPENAI_API_KEY, process.env.GEMINI_API_KEY, process.env.KEVCAL_TOKEN]) {
+    if (secret && secret.length >= 8) s = s.split(secret).join('[redacted]');
+  }
+  return s;
+}
+
 export function mediaTypeFor(name = '') {
   const ext = String(name).toLowerCase().split('.').pop();
   return {

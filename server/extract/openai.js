@@ -7,7 +7,7 @@
 // a phrase than Gemini is, so on a machine without the on-device OCR the
 // provenance overlay degrades to the quoted text alone.
 
-import { SYSTEM, SCHEMA, USER_PROMPT, toStrict, shapeResult, parseJSONLoosely, mediaTypeFor } from './contract.js';
+import { SYSTEM, SCHEMA, USER_PROMPT, toStrict, shapeResult, parseJSONLoosely, mediaTypeFor, redactSecrets } from './contract.js';
 
 const URL = 'https://api.openai.com/v1/responses';
 
@@ -56,7 +56,7 @@ async function callOnce(name, content, signal) {
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    return { ok: false, status: res.status, error: `http_${res.status}`, detail: detail.slice(0, 400) };
+    return { ok: false, status: res.status, error: `http_${res.status}`, detail: redactSecrets(detail).slice(0, 400) };
   }
   return { ok: true, body: await res.json() };
 }
@@ -94,7 +94,7 @@ export async function read(input) {
         attempt = await callOnce(name, content, controller.signal);
       } catch (e) {
         if (e.name === 'AbortError') return { ok: false, error: 'timeout' };
-        return { ok: false, error: 'network', detail: e.message };
+        return { ok: false, error: 'network', detail: redactSecrets(e.message) };
       }
       if (attempt.ok) {
         if (attempt.body?.status === 'incomplete') {
