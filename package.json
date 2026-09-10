@@ -10,7 +10,8 @@
     "build:tools": "swiftc -O -o bin/kevcal-ocr tools/ocr.swift && swiftc -O -o bin/kevcal-samples tools/make-samples.swift",
     "samples": "./bin/kevcal-samples samples",
     "test": "node test/verify.test.js && node test/readers.test.js && node test/run.js",
-    "icons": "node tools/make-icon.mjs"
+    "icons": "node tools/make-icon.mjs",
+    "ab": "node tools/ab-readers.mjs"
   },
   "dependencies": {}
 }

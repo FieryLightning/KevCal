@@ -90,6 +90,14 @@ rather than the text stream — and it is why the header now names the engine th
 actually read each import. The repeated-title check means those 27 arrive flagged
 rather than silently.
 
+## Choosing between the two readers
+
+`npm run ab -- <file>` runs one document through both and diffs the checked
+results side by side, with each reader's verbatim quote shown wherever they
+disagree. Written because the published benchmarks answer a different question
+(object detection) than the one that decides this (reading a crumpled letter),
+and that question can only be settled on real documents.
+
 ## Known rough edges
 
 - The Gemini path has never been run against the live API — there is no key on

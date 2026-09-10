@@ -44,6 +44,21 @@ On a Mac with `npm run build:tools` done, geometry comes from the on-device OCR
 anyway, so the box difference mostly disappears and the choice comes down to
 price and which key you already have.
 
+**Settle it on your own documents.** General benchmarks say nothing useful about
+which model reads *your* folded, badly-lit school letter correctly. With both
+keys set:
+
+```bash
+npm run ab -- samples/school-letter.png
+npm run ab -- --text "Parents evening Thursday 12 March at 4.30"
+npm run ab -- letter.jpg --now 2026-09-10T00:20   # also exercises the midnight rule
+```
+
+It runs the same page through both, puts each answer through the same checker,
+and prints what they agreed on, where they disagree (with each one's verbatim
+quote, so you can see *why*), and what only one of them found. Where they
+disagree is where to look — that is the answer, and it costs one call each.
+
 ---
 
 ## What it will not do
