@@ -12,7 +12,8 @@
     "test": "node test/verify.test.js && node test/readers.test.js && node test/run.js",
     "icons": "node tools/make-icon.mjs",
     "ab": "node tools/ab-readers.mjs",
-    "doctor": "node tools/doctor.mjs"
+    "doctor": "node tools/doctor.mjs",
+    "demo": "node tools/demo.mjs"
   },
   "dependencies": {}
 }

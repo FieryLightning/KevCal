@@ -270,6 +270,66 @@ Deleting an import deletes its original image too.
 
 ---
 
+## Trying it locally
+
+Four ways, in order of what they cost you.
+
+**Nothing at all — the whole app, clickable.**
+
+```bash
+npm run demo        # then open http://127.0.0.1:4322
+```
+
+Reading is served from a recorded answer instead of a model, so no key is used
+and nothing is uploaded. It seeds three imports and leaves one in review, with
+one date that needs an answer and one worth a check — so every state is there
+to poke at: the flags, the editor, the provenance overlay, sharing, undo. It
+writes to a throwaway directory, so your real imports are untouched, and the
+dates are relative to today so it never goes stale.
+
+**Nothing — the rules themselves.**
+
+```bash
+npm test            # 270 tests, no key, no network
+npm run doctor      # is this machine set up safely?
+```
+
+**About a penny — one real page, read for real.**
+
+```bash
+npm start           # then open the address it prints
+```
+
+Import `samples/school-letter.png`, or photograph something on your desk. This
+is the only way to find out whether the reader is any good on your documents.
+The running-cost line at the bottom of every screen tells you what it spent.
+
+**About two pence — both readers on the same page.**
+
+```bash
+npm run ab -- samples/school-letter.png
+```
+
+Needs both keys. Prints what they agreed on and, where they differ, each one's
+verbatim quote beside its answer — which usually makes it obvious which
+misread the page.
+
+### Testing the awkward cases
+
+The after-midnight rule is hard to try on purpose, because the app uses your
+phone's real clock. To exercise it without staying up:
+
+```bash
+npm run ab -- letter.jpg --now 2026-09-10T00:20
+```
+
+Or drive the API directly, which is how the tests do it:
+
+```bash
+curl -s localhost:4321/api/capture -H 'content-type: application/json' \
+  -d '{"kind":"text","text":"The trip leaves tomorrow at 8am","now":"2026-09-10T00:20"}'
+```
+
 ## Running it somewhere always on
 
 KevCal *is* the machine it runs on — your phone only loads a page the server is
