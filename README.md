@@ -270,6 +270,30 @@ Deleting an import deletes its original image too.
 
 ---
 
+## Running it somewhere always on
+
+KevCal *is* the machine it runs on — your phone only loads a page the server is
+serving, so if the host sleeps, KevCal is gone until it wakes. Same wifi is the
+extra constraint on top of that, and campus networks usually stop devices
+reaching each other anyway.
+
+**[DEPLOY.md](DEPLOY.md)** covers moving it to an always-on host: what you give
+up by leaving macOS (the on-device cross-check and the offline fallback — the
+grammar cross-check survives intact), a small VPS start to finish, the systemd
+unit and Caddyfile in `deploy/`, backups, and a checklist before you trust it
+with real post.
+
+Before starting it anywhere, run:
+
+```bash
+npm run doctor
+```
+
+It checks the things that actually go wrong — a missing token on a public bind,
+a server left on UTC, a key with no ceiling, a world-readable `.env` — and exits
+non-zero on anything dangerous, so it can gate a deploy. The systemd unit runs
+it before every start.
+
 ## Layout
 
 ```

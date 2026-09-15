@@ -140,7 +140,28 @@ function tooMany(key, limit, windowMs) {
   if (hits.size > 5000) hits.clear();   // crude, but this never needs to be big
   return seen.length > limit;
 }
-const clientOf = (req) => req.socket.remoteAddress || 'unknown';
+/**
+ * Behind a reverse proxy every connection arrives from the proxy, so limiting by
+ * socket address would throttle the whole world as one client — one person
+ * fumbling the token would lock everybody out. Forwarded headers are only
+ * believed when KEVCAL_TRUST_PROXY says something trustworthy sets them;
+ * otherwise a client could simply claim to be someone else.
+ */
+const TRUST_PROXY = ['1', 'true', 'yes'].includes(String(process.env.KEVCAL_TRUST_PROXY || '').toLowerCase());
+
+function clientOf(req) {
+  if (TRUST_PROXY) {
+    const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    if (forwarded) return forwarded;
+  }
+  return req.socket.remoteAddress || 'unknown';
+}
+
+/** Whether TLS was terminated in front of us. Only a trusted proxy may assert it. */
+function isHTTPS(req) {
+  if (!TRUST_PROXY) return false;
+  return String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase() === 'https';
+}
 
 /** Sent on everything. The app loads no third-party anything, so this is tight. */
 const SECURITY_HEADERS = {
@@ -186,7 +207,7 @@ function unlocked(req, res, url) {
     if (url.searchParams.get('k')) {
       // Secure whenever a tunnel terminated TLS in front of us, so the cookie
       // cannot be picked off a plain-HTTP hop later.
-      const https = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
+      const https = isHTTPS(req);
       res.setHeader('set-cookie',
         `kc_token=${encodeURIComponent(TOKEN)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
     }
@@ -290,7 +311,12 @@ server.listen(PORT, HOST, () => {
       ? 'a recorded fixture (test mode) — nothing is uploaded anywhere'
       : `${READER_LABEL[readerName()] || readerName()} (${readerModel() || '—'}) — pages are uploaded to read them`;
   console.log(`  Reading        ${reading}`);
-  console.log(`  Cross-check    ${ocrAvailable() ? 'on-device OCR + date grammar' : 'date grammar only (run: npm run build:tools)'}`);
+  console.log(`  Cross-check    ${ocrAvailable()
+    ? 'on-device OCR + date grammar'
+    : `date grammar only${process.platform === 'darwin'
+        ? ' (run: npm run build:tools)'
+        : ' — no on-device reader on this platform, so there is no offline fallback'}`}`);
+  if (TRUST_PROXY) console.log('  Proxy          trusting X-Forwarded-For / -Proto');
   console.log(`  Door           ${TOKEN
     ? 'locked — the link needs ?k=…'
     : `OPEN to everything on this network${HOST === '127.0.0.1' ? ' (localhost only)' : ''}`}`);

@@ -182,12 +182,17 @@ try {
   await api(`/api/batches/${car.data.batch.id}/commit`, { method: 'POST' });
 
   console.log('\nR12: deadlines behave differently from events');
-  const agenda = (await api('/api/agenda')).data.items;
+  // An explicit window, because the sample's dates are fixed while today is not:
+  // the default agenda only reaches 30 days back, so this quietly started
+  // failing the morning the MOT date fell out of it.
+  const agenda = (await api('/api/agenda?from=2000-01-01&to=2099-12-31')).data.items;
   const mot = agenda.find((i) => i.start_date === '2026-08-14');
+  check('the MOT deadline is in the agenda at all', !!mot,
+    `${agenda.length} items, none dated 2026-08-14`);
   check('deadline has an escalating ladder', (mot?.lead_days_resolved || []).length >= 4);
   check('deadline exposes a runway', mot && mot.runway !== null);
   await api('/api/items/bulk', { method: 'POST', body: { ids: [mot.id], op: 'satisfy' } });
-  const afterSat = (await api('/api/agenda')).data.items.find((i) => i.id === mot.id);
+  const afterSat = (await api('/api/agenda?from=2000-01-01&to=2099-12-31')).data.items.find((i) => i.id === mot.id);
   check('marking sorted silences without deleting', afterSat?.satisfied === 1 && !!afterSat);
 
   console.log('\nbulk correction');
@@ -309,6 +314,70 @@ try {
 
   const missing = await api('/api/batches/does-not-exist');
   check('unknown batch 404s', missing.status === 404);
+
+  // ────────────────────────────────────────────────────────────────────
+  //  A locked instance, which is what anything on a tunnel must be.
+  //  Its own server, because the lock is decided once at startup.
+  // ────────────────────────────────────────────────────────────────────
+  console.log('\nthe lock');
+  const LOCK_PORT = PORT + 1;
+  const LOCK = 'http://127.0.0.1:' + LOCK_PORT;
+  const TOKEN = 'test-token-long-enough-to-pass';
+  const LOCK_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'kevcal-lock-'));
+  const locked = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], {
+    env: {
+      ...process.env,
+      KEVCAL_PORT: String(LOCK_PORT), KEVCAL_DATA: LOCK_DATA, KEVCAL_HOST: '127.0.0.1',
+      KEVCAL_TOKEN: TOKEN, KEVCAL_TRUST_PROXY: '1',
+      GEMINI_API_KEY: '', OPENAI_API_KEY: '', KEVCAL_FAKE_READER: '',
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  try {
+    const upSince = Date.now();
+    while (Date.now() - upSince < 8000) {
+      try { const r = await fetch(LOCK + '/api/health?k=' + TOKEN); if (r.ok) break; } catch { /* retry */ }
+      await new Promise((r) => setTimeout(r, 120));
+    }
+
+    const shut = await fetch(LOCK + '/');
+    check('the page is locked without a key', shut.status === 401, String(shut.status));
+    check('and it says so in HTML, not JSON', /text\/html/.test(shut.headers.get('content-type') || ''));
+    check('the lock page gives nothing away', !(await shut.text()).toLowerCase().includes(TOKEN));
+
+    const shutApi = await fetch(LOCK + '/api/agenda');
+    check('the API is locked too', shutApi.status === 401, String(shutApi.status));
+
+    const wrong = await fetch(LOCK + '/?k=not-the-token');
+    check('a wrong key stays locked', wrong.status === 401, String(wrong.status));
+
+    const opened = await fetch(LOCK + '/?k=' + TOKEN, { headers: { 'x-forwarded-proto': 'https' } });
+    check('the right key opens it', opened.status === 200, String(opened.status));
+    const cookie = opened.headers.get('set-cookie') || '';
+    check('and hands back a cookie', /kc_token=/.test(cookie), cookie);
+    check('the cookie is HttpOnly', /HttpOnly/i.test(cookie), cookie);
+    check('and SameSite=Lax', /SameSite=Lax/i.test(cookie), cookie);
+    check('and Secure, because a trusted proxy said the hop was HTTPS',
+      /Secure/i.test(cookie), cookie);
+
+    const withCookie = await fetch(LOCK + '/api/agenda', {
+      headers: { cookie: cookie.split(';')[0] },
+    });
+    check('the cookie alone is enough afterwards', withCookie.status === 200, String(withCookie.status));
+
+    // A share link is deliberately public: that is the entire point of sharing.
+    const made = await fetch(LOCK + '/api/shares?k=' + TOKEN, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: cookie.split(';')[0] },
+      body: JSON.stringify({ itemIds: ['nothing'], label: 'empty' }),
+    });
+    const shareToken = (await made.json()).token;
+    const publicFeed = await fetch(LOCK + '/s/' + shareToken + '.ics');
+    check('a shared list is reachable without the key', publicFeed.status === 200, String(publicFeed.status));
+  } finally {
+    locked.kill();
+    try { fs.rmSync(LOCK_DATA, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
 
   console.log('\nsafety: an upload is what its bytes say, not what its name says');
   const evilHtml = Buffer.from('<html><script>fetch("/api/agenda").then(r=>r.json())</script></html>').toString('base64');

@@ -1,0 +1,25 @@
+# TLS in front of KevCal, with certificates handled for you.
+#
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile   # edit the hostname first
+#   sudo systemctl reload caddy
+#
+# Caddy sets X-Forwarded-For and X-Forwarded-Proto, which is why .env needs
+# KEVCAL_TRUST_PROXY=1 — without it KevCal rate-limits every visitor as a single
+# client and never marks the auth cookie Secure.
+
+kevcal.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:4321
+
+	# Photographs go up as base64 JSON, so allow a generous body.
+	request_body {
+		max_size 40MB
+	}
+
+	# Access logs are off on purpose. Your token travels in ?k= on the very
+	# first visit from a new device, and a log file is a bad place for it.
+	# If you want logs, log to journald and accept that, or filter the query.
+	log {
+		output discard
+	}
+}

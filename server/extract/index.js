@@ -301,6 +301,13 @@ export async function extract(opts) {
       engineParts.push(ocr?.engine || (opts.kind === 'text' ? 'text' : 'vision'), 'grammar');
     } else if (opts.kind !== 'text') {
       engineParts.push('none');
+      // No reader and no on-device OCR means nothing read the page at all. Say
+      // so, rather than reporting an empty document as if it had no dates on it.
+      if (!readerError) {
+        readerError = ocrAvailable()
+          ? 'nothing could be read from that image'
+          : 'no reader is configured and this machine has no on-device reader, so nothing could read the page';
+      }
     }
   }
 

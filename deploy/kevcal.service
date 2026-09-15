@@ -1,0 +1,58 @@
+# KevCal as a system service.
+#
+#   sudo cp deploy/kevcal.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kevcal
+#   journalctl -u kevcal -f
+#
+# Assumes the checkout is at /opt/kevcal, owned by a user called `kevcal` that
+# owns nothing else. Adjust both if not.
+
+[Unit]
+Description=KevCal — turns photographed documents into calendar entries
+Documentation=file:/opt/kevcal/DEPLOY.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kevcal
+Group=kevcal
+WorkingDirectory=/opt/kevcal
+
+# The service refuses to start if the setup is unsafe — no token on a public
+# bind, an unwritable data directory, a world-readable .env. Warnings are fine;
+# only real problems stop it. Drop this line if you would rather it always boot.
+ExecStartPre=/usr/bin/node tools/doctor.mjs
+
+ExecStart=/usr/bin/node server/index.js
+Restart=on-failure
+RestartSec=5s
+
+# KevCal reads .env itself, so nothing needs to be duplicated here. Set the zone
+# explicitly: a server on UTC will export calendar times an hour or five out.
+Environment=NODE_ENV=production
+Environment=TZ=Europe/London
+
+# ── hardening ──────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/kevcal/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+# Node's JIT writes then executes, so this one cannot be turned on.
+MemoryDenyWriteExecute=false
+
+[Install]
+WantedBy=multi-user.target
