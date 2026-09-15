@@ -88,7 +88,15 @@ export async function read(input) {
       last = attempt;
       // Only a missing or renamed model is worth retrying down the chain; an auth
       // or quota failure will fail identically on every model.
-      const retryable = attempt.status === 404 || (attempt.status === 400 && /model/i.test(attempt.detail || ''));
+      // A model that is missing, renamed, or not entitled to this project is
+      // worth retrying further down the chain. A refusal aimed at the whole
+      // project is not — every model will say the same thing.
+      const projectWide = /project/i.test(attempt.detail || '');
+      const retryable = !projectWide && (
+        attempt.status === 404
+        || attempt.status === 403
+        || (attempt.status === 400 && /model/i.test(attempt.detail || ''))
+      );
       if (!retryable) break;
     }
     return { ok: false, error: last?.error || 'failed', detail: last?.detail, status: last?.status };

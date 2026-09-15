@@ -51,10 +51,19 @@ const server = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], {
     ...process.env,
     KEVCAL_PORT: String(PORT), KEVCAL_DATA: TMP_DATA, KEVCAL_HOST: '127.0.0.1',
     KEVCAL_FAKE_READER: FIXTURE,
-    // Both cleared so a key in the developer's shell can never make the tests
-    // reach the network or change which reader is reported.
+    // Everything KevCal reads from the environment is blanked, so the suite
+    // cannot be steered by whatever happens to be in the developer's .env.
+    // (Adding a budget there once made eight of these fail, which is exactly
+    // the kind of thing a test run should be immune to.)
     GEMINI_API_KEY: '',
     OPENAI_API_KEY: '',
+    KEVCAL_MONTHLY_BUDGET: '',
+    KEVCAL_READER: '',
+    KEVCAL_TOKEN: '',
+    KEVCAL_TRUST_PROXY: '',
+    KEVCAL_MODEL: '',
+    GEMINI_MODEL: '',
+    OPENAI_MODEL: '',
   },
   stdio: ['ignore', 'ignore', 'pipe'],
 });
@@ -330,6 +339,7 @@ try {
       KEVCAL_PORT: String(LOCK_PORT), KEVCAL_DATA: LOCK_DATA, KEVCAL_HOST: '127.0.0.1',
       KEVCAL_TOKEN: TOKEN, KEVCAL_TRUST_PROXY: '1',
       GEMINI_API_KEY: '', OPENAI_API_KEY: '', KEVCAL_FAKE_READER: '',
+      KEVCAL_MONTHLY_BUDGET: '', KEVCAL_READER: '',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
@@ -577,7 +587,9 @@ try {
     `${(await api('/api/settings')).data.budget.calls} vs ${callsBefore}`);
   await api(`/api/batches/${refused.data.batch.id}`, { method: 'DELETE' });
 
-  await api('/api/settings', { method: 'POST', body: { monthly_budget: 1 } });
+  // Comfortably above whatever earlier fixture calls in this run have accrued;
+  // the point of this one is that raising the cap unpauses reading.
+  await api('/api/settings', { method: 'POST', body: { monthly_budget: 100 } });
   const allowed = await api('/api/capture', { method: 'POST', body: {
     kind: 'text', text: 'anything', now: '2026-09-10T10:00',
   } });

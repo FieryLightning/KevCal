@@ -171,6 +171,35 @@ export function redactSecrets(text) {
   return s;
 }
 
+/**
+ * Providers report failure in their own vocabulary, and the raw text lands in
+ * front of the user. "http_403: Your project has been denied access" says
+ * nothing about what to do next; these do.
+ */
+export function explainError(error, detail = '') {
+  const text = String(detail || '');
+  const code = String(error || '');
+
+  if (/denied access|permission_denied/i.test(text)) {
+    return 'The provider is refusing this project access to its models. The key itself is fine — '
+         + 'it is the project behind it that is not allowed. Check the API is enabled and the terms '
+         + 'accepted in the provider console, or switch readers with KEVCAL_READER.';
+  }
+  if (/no longer available/i.test(text)) {
+    return 'That model has been retired. Set GEMINI_MODEL or OPENAI_MODEL in .env to a current one.';
+  }
+  if (code.startsWith('http_401') || /invalid.*(api key|authentication)/i.test(text)) {
+    return 'The provider rejected the key. Check it was pasted whole into .env, then restart.';
+  }
+  if (code.startsWith('http_429') || /quota|rate limit/i.test(text)) {
+    return 'You have hit the provider\'s rate limit or quota. Wait a few minutes, or raise the limit.';
+  }
+  if (code === 'timeout') return 'The reader took too long to answer. A smaller or clearer photo usually helps.';
+  if (code === 'network') return 'Could not reach the provider. Check this machine is online.';
+  if (code === 'no_api_key') return 'No reading key is set, so there was nothing to ask.';
+  return null;
+}
+
 export function mediaTypeFor(name = '') {
   const ext = String(name).toLowerCase().split('.').pop();
   return {

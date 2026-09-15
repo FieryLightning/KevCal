@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { buildItems, fingerprint } from './build.js';
 import { readDocument, readerAvailable, readerName, readerModel } from './reader.js';
+import { explainError } from './contract.js';
 import { verifyItems } from './verify.js';
 import { ROOT } from '../db.js';
 import * as budget from '../lib/budget.js';
@@ -291,7 +292,10 @@ export async function extract(opts) {
     engineParts.push('checked');
   } else {
     if (money.paused && readerAvailable()) readerError = budget.pausedMessage(money);
-    else if (ai && !ai.ok) readerError = ai.detail ? `${ai.error}: ${ai.detail}` : ai.error;
+    else if (ai && !ai.ok) {
+      readerError = explainError(ai.error, ai.detail)
+        || (ai.detail ? `${ai.error}: ${ai.detail}` : ai.error);
+    }
     if (lines.length) {
       const built = buildItems(lines, { reference, anchor: opts.anchor });
       items = annotateBuiltItems(built.items, { now });

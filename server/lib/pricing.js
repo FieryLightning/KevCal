@@ -30,8 +30,15 @@ const PER_MTOK = {
 // silently useless.
 const UNKNOWN = MTOK(12.00, 60.00);
 
-/** A typical KevCal call: one photographed page in, a handful of items out. */
-export const TYPICAL_CALL = { in: 2500, out: 700 };
+/**
+ * A typical KevCal call, MEASURED rather than guessed: a dense school letter
+ * read by gpt-5.6-terra came to 4,578 tokens in and 1,996 out. The first guess
+ * here was 2,500/700, which under-counted spend by about two and a half times —
+ * and a budget that under-counts is a budget that overshoots.
+ *
+ * A poster costs less than this; a multi-page PDF costs more.
+ */
+export const TYPICAL_CALL = { in: 5000, out: 2000 };
 
 export const PRICES_CHECKED = '2026-09-11';
 
