@@ -42,9 +42,10 @@ function render(size) {
     for (let x = 0; x < S; x++) {
       const X = x / u, Y = y / u;
 
-      // Tile: violet to magenta on the diagonal.
+      // Tile: ink blue, deepening across the diagonal. One hue, two tones —
+      // the same restraint the app's palette uses.
       const t = clamp((X + Y) / 1024, 0, 1);
-      let rgb = [lerp(99, 190, t), lerp(78, 74, t), lerp(252, 246, t)];
+      let rgb = [lerp(24, 58, t), lerp(66, 122, t), lerp(93, 161, t)];
       let alpha = coverage(roundRectSDF(X, Y, 256, 256, 256, 256, 114) * u) ;
 
       // Calendar body.
@@ -55,7 +56,7 @@ function render(size) {
       if (Y < 190) {
         const band = coverage(roundRectSDF(X, Y, 256, 272, 150, 132, 30))
                    * coverage(roundRectSDF(X, Y, 256, 150, 150, 44, 24));
-        rgb = over(rgb, [237, 233, 254], band);
+        rgb = over(rgb, [228, 236, 241], band);
       }
 
       // Two binding tabs above the card.
@@ -71,7 +72,8 @@ function render(size) {
           const cy = 236 + row * 56;
           const dot = coverage(roundRectSDF(X, Y, cx, cy, 15, 15, 15));
           const isMarked = row === 1 && col === 2;
-          rgb = over(rgb, isMarked ? [124, 58, 237] : [203, 199, 218], dot * (isMarked ? 1 : 0.85));
+          // The marked day is stamp red, the same red a deadline gets in the app.
+          rgb = over(rgb, isMarked ? [168, 39, 29] : [200, 204, 209], dot * (isMarked ? 1 : 0.85));
         }
       }
 

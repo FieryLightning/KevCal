@@ -149,7 +149,7 @@ async function loadDates() {
     : 'Tap the camera and point it at something with a date on it.';
 
   if (!live.length) {
-    list.innerHTML = `<div class="empty"><span class="g">📸</span><b>No dates yet</b>
+    list.innerHTML = `<div class="empty"><b>No dates yet</b>
       A school letter, a poster, a timetable, an appointment card — anything.</div>`;
     return;
   }
@@ -640,7 +640,7 @@ async function loadImports() {
   const { batches = [] } = await api('/api/batches');
   const list = $('#importsList');
   if (!batches.length) {
-    list.innerHTML = `<div class="empty"><span class="g">📥</span><b>No imports yet</b>Every capture shows up here, and every one can be undone whole.</div>`;
+    list.innerHTML = `<div class="empty"><b>No imports yet</b>Every capture shows up here, and every one can be undone whole.</div>`;
     return;
   }
   list.innerHTML = batches.map((b) => {
@@ -724,7 +724,7 @@ async function loadShares() {
   const { shares = [] } = await api('/api/shares');
   const list = $('#sharedList');
   if (!shares.length) {
-    list.innerHTML = `<div class="empty"><span class="g">🔗</span><b>Nothing shared</b>Share an import and the link shows up here, with a switch to kill it.</div>`;
+    list.innerHTML = `<div class="empty"><b>Nothing shared</b>Share an import and the link shows up here, with a switch to kill it.</div>`;
     return;
   }
   list.innerHTML = shares.map((s) => `<div class="card">
