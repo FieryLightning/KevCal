@@ -276,7 +276,17 @@ export function getBatchHandler(req, res, batchId, url) {
   const batch = getBatch(batchId);
   if (!batch) return notFound(res, 'batch not found');
   if (url?.searchParams.get('lineage') !== '1') {
-    return json(res, 200, { batch, items: getItems(batchId).map(decorate) });
+    const items = getItems(batchId).map(decorate);
+    // An un-applied revision recomputes its comparison on demand, so closing the
+    // screen does not strand it: the diff used to exist only in the reply to the
+    // capture that made it, and was gone the moment you navigated away.
+    let diff = null;
+    if (batch.parent_id && batch.status === 'draft') {
+      const parentItems = getItems(batch.parent_id).filter((i) => i.status !== 'rejected');
+      const d = diffItems(parentItems, items);
+      diff = { ...d, description: describeDiff(d) };
+    }
+    return json(res, 200, { batch, items, diff });
   }
   const ids = lineageIds(batchId);
   const marks = ids.map(() => '?').join(',');
