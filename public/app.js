@@ -786,6 +786,7 @@ async function loadSettings() {
 
   renderBudget(s);
   renderPrices(s);
+  loadFeed();
   $('#tzInput').value = s.timezone || timezone();
   $('#leadDeadline').value = (s.lead_days?.deadline || []).join(', ');
   $('#leadEvent').value = (s.lead_days?.event || []).join(', ');
@@ -854,6 +855,41 @@ const money = (n) => {
   if (v === 0) return '$0.00';
   return v < 0.01 ? '<$0.01' : '$' + v.toFixed(2);
 };
+
+/**
+ * The subscription is the answer to "how do I get these into my actual
+ * calendar" — and, more importantly, to "how do I take them out again".
+ * webcal:// is what makes a phone offer to subscribe rather than download.
+ */
+async function loadFeed() {
+  const f = await api('/api/feed');
+  if (f.error) return;
+  const url = location.host + f.path;
+  state.feedUrl = location.protocol + '//' + url;
+  $('#btnSubscribe').href = 'webcal://' + url;
+  $('#feedStatus').innerHTML =
+    '<div class="banner"><b>' + f.dates + ' date' + (f.dates === 1 ? '' : 's')
+    + '</b> are in this feed right now.'
+    + (f.fetch_count
+        ? ' Your calendar has picked it up ' + f.fetch_count + ' time' + (f.fetch_count === 1 ? '' : 's') + '.'
+        : ' Nothing has subscribed to it yet.')
+    + '</div>'
+    + '<p class="muted small" style="margin-top:8px">Anyone with this link can read your dates, '
+    + 'because a calendar app cannot log in. Treat it like a password; <b>New link</b> kills the old one.</p>';
+}
+
+$('#btnCopyFeed').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(state.feedUrl); toast('Link copied'); }
+  catch { toast(state.feedUrl); }
+});
+
+$('#btnRotateFeed').addEventListener('click', async () => {
+  if (!confirm('Make a new link? Any calendar already subscribed to the old one will stop updating.')) return;
+  const f = await api('/api/feed/rotate', { method: 'POST' });
+  if (f.error) return toast(f.error);
+  toast('New link made — subscribe again on each device');
+  loadFeed();
+});
 
 function renderPrices(s) {
   const rows = s.prices || [];

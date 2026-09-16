@@ -717,6 +717,59 @@ export async function createShare(req, res) {
   json(res, 200, { ok: true, id: shareId, token, path: `/s/${token}` });
 }
 
+/**
+ * Your own calendar, as a subscription rather than a file.
+ *
+ * Exporting a .ics copies dates INTO Apple Calendar and the copy is then on its
+ * own: undo an import afterwards and the events stay there forever, which makes
+ * "undo is one button" quietly untrue the moment it matters. A subscribed feed
+ * is read live on every fetch, so KevCal stays the source of truth — correct a
+ * date and it moves, undo an import and the dates leave, delete one and it goes.
+ *
+ * The token is the credential: a calendar app cannot present a header, so the
+ * URL has to carry it. That is why /s/ deliberately sits outside the lock.
+ */
+function personalShare() {
+  return db.prepare('SELECT * FROM shares WHERE is_personal = 1 AND revoked = 0').get();
+}
+
+function feedPayload(share) {
+  const live = itemsForExport({}).filter((i) => i.start_date);
+  return {
+    token: share.token,
+    path: `/s/${share.token}.ics`,
+    dates: live.length,
+    fetch_count: share.fetch_count,
+    last_fetch: share.last_fetch,
+    created_at: share.created_at,
+  };
+}
+
+export function personalFeed(req, res) {
+  let share = personalShare();
+  if (!share) {
+    const shareId = id('sh_');
+    // Longer than a shared list's token: this one names everything you own.
+    const token = crypto.randomBytes(18).toString('base64url');
+    db.prepare(`INSERT INTO shares (id, batch_id, token, label, item_ids, created_at, is_personal)
+                VALUES (?,?,?,?,?,?,1)`)
+      .run(shareId, null, token, 'Your calendar', null, nowISO());
+    log('feed_create', { detail: shareId });
+    share = db.prepare('SELECT * FROM shares WHERE id = ?').get(shareId);
+  }
+  json(res, 200, feedPayload(share));
+}
+
+/** Kills the old address and issues a new one, for when a link has got out. */
+export function rotateFeed(req, res) {
+  const before = personalShare();
+  if (before) {
+    db.prepare('UPDATE shares SET revoked = 1 WHERE is_personal = 1').run();
+    log('feed_rotate', { detail: before.id });
+  }
+  return personalFeed(req, res);
+}
+
 function shareItems(share) {
   const ids = share.item_ids ? safeParse(share.item_ids) : null;
   return itemsForExport({ batchId: share.batch_id, itemIds: ids });
@@ -747,11 +800,15 @@ export function shareTextHandler(req, res, url) {
 }
 
 export function listShares(req, res) {
-  const rows = db.prepare('SELECT * FROM shares WHERE revoked = 0 ORDER BY created_at DESC').all();
+  const rows = db.prepare('SELECT * FROM shares WHERE revoked = 0 AND is_personal = 0 ORDER BY created_at DESC').all();
   json(res, 200, { shares: rows });
 }
 
 export function revokeShare(req, res, shareId) {
+  const row = db.prepare('SELECT is_personal FROM shares WHERE id = ?').get(shareId);
+  if (row?.is_personal) {
+    return badRequest(res, 'that is your own calendar feed — rotate it from Settings instead');
+  }
   const n = db.prepare('UPDATE shares SET revoked = 1 WHERE id = ?').run(shareId).changes;
   if (!n) return notFound(res, 'share not found');
   log('share_revoke', { detail: shareId });

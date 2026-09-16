@@ -324,6 +324,64 @@ try {
   const missing = await api('/api/batches/does-not-exist');
   check('unknown batch 404s', missing.status === 404);
 
+  {
+    console.log('\nyour own calendar, as a live feed');
+    const myFeed = await api('/api/feed');
+    check('a personal feed is created on demand', !!myFeed.data.token, JSON.stringify(myFeed.data));
+    check('its token is long enough to be unguessable', (myFeed.data.token || '').length >= 20);
+    check('asking twice returns the same one', (await api('/api/feed')).data.token === myFeed.data.token);
+    check('it is not listed among links you handed out',
+      !((await api('/api/shares')).data.shares || []).some((x) => x.token === myFeed.data.token));
+
+    const eventsIn = async (token) => {
+      const r = await fetch(`${BASE}/s/${token}.ics`);
+      if (!r.ok) return null;
+      return ((await r.text()).match(/BEGIN:VEVENT/g) || []).length;
+    };
+
+    reads({ items: [
+      { title: 'Swimming gala', kind: 'event', start_date: '2027-05-04', has_explicit_year: true,
+        am_pm_stated: true, confidence: 0.95, source_quote: 'Swimming gala 4 May 2027' },
+      { title: 'Kit money', kind: 'deadline', start_date: '2027-04-20', has_explicit_year: true,
+        am_pm_stated: true, confidence: 0.94, source_quote: 'Kit money due 20 April 2027' },
+    ] });
+    const beforeFeed = await eventsIn(myFeed.data.token);
+    const trip = await api('/api/capture', { method: 'POST', body: {
+      kind: 'text', text: 'anything', now: '2026-09-15T10:00',
+    } });
+    check('a draft import is NOT in the feed yet', await eventsIn(myFeed.data.token) === beforeFeed,
+      'drafts must not reach a calendar');
+
+    await api(`/api/batches/${trip.data.batch.id}/commit`, { method: 'POST' });
+    const afterCommit = await eventsIn(myFeed.data.token);
+    check('committing puts them in the feed', afterCommit === beforeFeed + 2,
+      `${beforeFeed} -> ${afterCommit}`);
+
+    // The whole reason this exists: an exported file cannot do the next line.
+    await api(`/api/batches/${trip.data.batch.id}/undo`, { method: 'POST' });
+    check('UNDO removes them from the calendar too', await eventsIn(myFeed.data.token) === beforeFeed,
+      'undo must reach a subscribed calendar, not just KevCal');
+
+    await api(`/api/batches/${trip.data.batch.id}/redo`, { method: 'POST' });
+    check('restore puts them back', await eventsIn(myFeed.data.token) === beforeFeed + 2);
+
+    const tripItems = (await api(`/api/batches/${trip.data.batch.id}`)).data.items;
+    await api(`/api/items/${tripItems[0].id}`, { method: 'PATCH', body: { title: 'Swimming gala (moved)' } });
+    const ics = await (await fetch(`${BASE}/s/${myFeed.data.token}.ics`)).text();
+    check('an edit here shows up there', /Swimming gala \(moved\)/.test(ics));
+
+    await api('/api/items/bulk', { method: 'POST', body: { op: 'delete', ids: [tripItems[0].id] } });
+    check('deleting one removes just that one', await eventsIn(myFeed.data.token) === beforeFeed + 1);
+
+    const oldToken = myFeed.data.token;
+    const rotated = await api('/api/feed/rotate', { method: 'POST' });
+    check('the link can be rotated', rotated.data.token && rotated.data.token !== oldToken);
+    check('the old link stops working', await eventsIn(oldToken) === null);
+    check('the new one serves the same dates', await eventsIn(rotated.data.token) === beforeFeed + 1);
+
+    await api(`/api/batches/${trip.data.batch.id}`, { method: 'DELETE' });
+  }
+
   // ────────────────────────────────────────────────────────────────────
   //  A locked instance, which is what anything on a tunnel must be.
   //  Its own server, because the lock is decided once at startup.

@@ -145,6 +145,8 @@ addColumn('items', 'date_basis TEXT', 'date_basis');
 addColumn('batches', 'doc_date TEXT', 'doc_date');
 addColumn('batches', 'tz TEXT', 'tz');
 addColumn('batches', 'captured_at_local TEXT', 'captured_at_local');
+// The one feed that is your own calendar rather than a list handed to someone else.
+addColumn('shares', 'is_personal INTEGER NOT NULL DEFAULT 0', 'is_personal');
 
 export function nowISO() { return new Date().toISOString(); }
 
