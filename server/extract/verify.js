@@ -114,6 +114,10 @@ function resolveRelative(item, ctx) {
     case 'this_weekday':
       if (dow == null) break;
       date = weekdayOnOrAfter(anchor, dow);
+      // "Monday" names a day of the week, not a date. Which Monday is a
+      // question the document did not answer, so neither will KevCal.
+      alternative = addDays(date, 7);
+      altLabel = 'the Monday after';
       break;
     case 'next_weekday':
       if (dow == null) break;
@@ -181,19 +185,22 @@ function resolveRelative(item, ctx) {
           { label: `${human(addDays(ctx.now.date, kind === 'tomorrow' ? 1 : 0))} (from today)`, patch: { start_date: addDays(ctx.now.date, kind === 'tomorrow' ? 1 : 0) } },
         ]));
     } else {
-      flags.push(flag('relative_no_document_date', 'check',
-        `"${phrase}" is counted from today, because the document doesn't say when it was written.`,
-        options));
+      // Counting from today assumes the document was written today. That is
+      // KevCal's assumption, not the document's, so it gets confirmed.
+      flags.push(flag('relative_no_document_date', 'blocker',
+        `"${phrase}" — nothing on the page says when it was written, so this is counted from today. Is ${human(date)} right?`,
+        options.concat([{ label: `${human(addDays(date, 7))} (a week later)`, patch: { start_date: addDays(date, 7) } }])));
     }
   }
 
   // 2. Genuinely ambiguous English, regardless of anchor.
   if (alternative) {
+    const dayName = DOW_NAMES[dayOfWeek(date)];
     flags.push(flag('relative_ambiguous_phrase', 'blocker',
-      `"${phrase}" could be either of these. Which did they mean?`,
+      `"${phrase}" — is that the coming ${dayName}, or the one after?`,
       [
-        { label: `${human(date)} (the coming one)`, patch: { start_date: date } },
-        { label: `${human(alternative)} (${altLabel})`, patch: { start_date: alternative } },
+        { label: `${human(date)} (the coming ${dayName})`, patch: { start_date: date } },
+        { label: `${human(alternative)} (${altLabel.replace('Monday', dayName)})`, patch: { start_date: alternative } },
       ]));
   }
 
@@ -423,10 +430,12 @@ export function verifyItems(rawItems, ctx) {
         const guessed = inferYear(mo, d, ctx.now.date);
         if (isValidYMD(guessed, mo, d)) date = iso(guessed, mo, d);
         const other = isValidYMD(guessed + 1, mo, d) ? iso(guessed + 1, mo, d) : null;
-        const options = [{ label: String(guessed), patch: { start_date: date } }];
-        if (other) options.push({ label: String(guessed + 1), patch: { start_date: other } });
-        flags.push(flag('year_assumed', 'check',
-          `No year printed next to this one, and nothing on the page dates itself — I've assumed ${guessed}.`,
+        const options = [{ label: `${formatHuman(date)} — the coming one`, patch: { start_date: date } }];
+        if (other) options.push({ label: formatHuman(other), patch: { start_date: other } });
+        // The document prints no year and dates nothing, so the year came from
+        // today's clock. That is a guess, and a guess gets confirmed.
+        flags.push(flag('year_assumed', 'blocker',
+          `No year is printed for ${MONTH_NAMES[mo - 1]} ${d}, and nothing on the page dates itself. Is this the coming one?`,
           options));
       }
       basis = basis === 'explicit' ? 'year_assumed' : basis;
@@ -456,6 +465,15 @@ export function verifyItems(rawItems, ctx) {
         }
         date = corrected;
       }
+    }
+
+    // 2c. A month is not a date. If the page never printed a day, whatever sits
+    //     in start_date was chosen by the reader, and nobody asked it to.
+    if (date && raw.has_explicit_day === false) {
+      const [, mo2, d2] = date.split('-').map(Number);
+      flags.push(flag('day_assumed', 'blocker',
+        `The page names ${MONTH_NAMES[mo2 - 1]} but not which day. I've put it on the ${d2}${ordinal(d2)} — which day is it?`,
+        [{ label: `${formatHuman(date)}`, patch: { start_date: date } }]));
     }
 
     // 3. Everything that can disagree, made to disagree out loud.
@@ -592,6 +610,11 @@ function clamp01(v, fallback) {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(0.05, Math.min(0.99, n));
+}
+
+function ordinal(n) {
+  if (n % 100 >= 11 && n % 100 <= 13) return 'th';
+  return { 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th';
 }
 
 function str(v) {

@@ -17,6 +17,7 @@ export const ITEM_PROPERTIES = {
   start_date: { type: ['string', 'null'], description: 'YYYY-MM-DD, ONLY when the document prints an actual calendar date. null for anything relative or unstated.' },
   end_date: { type: ['string', 'null'], description: 'YYYY-MM-DD for the last day of a multi-day range, else null.' },
   has_explicit_year: { type: 'boolean', description: 'true only if a year is printed next to this date. If you had to assume the year, this is false.' },
+  has_explicit_day: { type: 'boolean', description: 'true if the document prints an actual day of the month. false when it names only a month or a season ("in March", "early spring") and you had to pick a day. Never invent one quietly.' },
   weekday_stated: { type: ['string', 'null'], description: 'The weekday word printed alongside the date, verbatim ("Thursday", "Fri"). null if none was printed. Do not work it out yourself.' },
 
   relative_phrase: { type: ['string', 'null'], description: 'Verbatim relative wording used instead of a date ("tomorrow", "next Friday", "in 3 weeks"). null if the document printed a real date.' },
@@ -90,6 +91,8 @@ You are the READER. A separate program does the calendar arithmetic. Your job is
 HARD RULES
 
 1. NEVER calculate a date. If the document says "tomorrow", "next Friday", "this Thursday", "in three weeks" or "week 7", set start_date to null, and instead fill relative_phrase / relative_kind / relative_weekday / relative_n. You do not know today's date, and guessing is the single worst thing you can do here.
+
+2b. NEVER invent a day of the month. If the page says only "March" or "early spring", set has_explicit_day to false. A month is not a date.
 
 2. NEVER invent a year. Set has_explicit_year to false whenever the year is not printed beside that date, and put your best reading in start_date anyway using the document's own context if it has one. If you genuinely cannot tell, leave start_date null and write the question in "unresolved".
 

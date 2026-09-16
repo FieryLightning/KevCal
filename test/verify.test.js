@@ -16,6 +16,10 @@ function check(name, cond, detail = '') {
 
 function group(name) { console.log(`\n${name}`); }
 
+const addDaysStr = (d, n) => {
+  const t = new Date(`${d}T00:00:00Z`); t.setUTCDate(t.getUTCDate() + n);
+  return t.toISOString().slice(0, 10);
+};
 const clock = (date, time) => ({ date, time, hour: Number(time.slice(0, 2)) });
 const AFTERNOON = clock('2026-09-10', '14:30');
 const SMALL_HOURS = clock('2026-09-10', '00:20');
@@ -176,7 +180,8 @@ group('every assumption is said out loud');
 {
   const it = run(read({ start_date: '2026-11-05', has_explicit_year: false, source_quote: 'Bonfire night, 5 November' }));
   const f = flagOf(it, 'year_assumed');
-  check('a year nobody printed is flagged', f?.level === 'check');
+  check('a year nobody printed blocks until confirmed', f?.level === 'blocker', f?.level);
+  check('and the item cannot reach a calendar meanwhile', it.blocked === 1);
   check('with both plausible years offered', f?.options?.length === 2);
   check('and the date still resolves', it.start_date === '2026-11-05', it.start_date);
 }
@@ -258,6 +263,42 @@ group('a clean date stays quiet');
   const it = run(read({ start_date: '2026-10-01', repeats_hint: 'every other Tuesday', source_quote: 'every other Tuesday' }));
   check('a repeat is only ever a suggestion', it.rrule === null && it.recurrence_accepted === 0);
   check('and the wording is kept verbatim', JSON.parse(it.recurrence_suggestion).phrase === 'every other Tuesday');
+}
+
+group('nothing is assumed from the clock without asking');
+{
+  // "Monday" names a day of the week, not a date.
+  const mon = run(read({ relative_phrase: 'Monday', relative_kind: 'this_weekday', relative_weekday: 'monday' }));
+  const amb = flagOf(mon, 'relative_ambiguous_phrase');
+  check('a bare weekday asks which one', amb?.level === 'blocker', JSON.stringify(codes(mon)));
+  check('and names the day in the question', /coming Monday/.test(amb?.message || ''), amb?.message);
+  check('offering the coming one and the one after',
+    amb.options[1].patch.start_date === addDaysStr(amb.options[0].patch.start_date, 7),
+    JSON.stringify(amb.options.map((o) => o.patch.start_date)));
+
+  // A month with no day printed is not a date.
+  const mar = run(read({ title: 'Trip', start_date: '2027-03-01', has_explicit_day: false, source_quote: 'in March' }));
+  check('a month with no day blocks', flagOf(mar, 'day_assumed')?.level === 'blocker', JSON.stringify(codes(mar)));
+  check('and says which month it read', /March/.test(flagOf(mar, 'day_assumed').message));
+
+  const withDay = run(read({ title: 'Trip', start_date: '2027-03-04', has_explicit_day: true, source_quote: '4 March' }));
+  check('a printed day is left alone', !codes(withDay).includes('day_assumed'));
+
+  // Counting "tomorrow" from today assumes the page was written today.
+  const tom = run(read({ relative_phrase: 'tomorrow', relative_kind: 'tomorrow' }));
+  check('counting from today is confirmed, not assumed',
+    flagOf(tom, 'relative_no_document_date')?.level === 'blocker', JSON.stringify(codes(tom)));
+
+  // But when the DOCUMENT supplies the fact, that is reading, not assuming.
+  const dated = run(read({ relative_phrase: 'tomorrow', relative_kind: 'tomorrow' }), { documentDate: '2026-09-01' });
+  check('a document that dates itself is trusted without a question',
+    !codes(dated).includes('relative_no_document_date') && dated.blocked === 0,
+    JSON.stringify(codes(dated)));
+
+  const spanned = run(read({ start_date: '2027-01-14', has_explicit_year: false, source_quote: '14 January' }),
+    { documentSpan: '2026-2027' });
+  check('a document that names its span is trusted too',
+    !codes(spanned).includes('year_assumed') && spanned.blocked === 0, JSON.stringify(codes(spanned)));
 }
 
 group('a document that names its own year span is the authority');
