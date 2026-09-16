@@ -13,9 +13,10 @@
 //             with one-tap alternatives; can be added.
 
 import {
-  DOW, DOW_NAMES, iso, isValidYMD, addDays, dayOfWeek, daysBetween,
+  DOW, DOW_NAMES, MONTH_NAMES, iso, isValidYMD, addDays, dayOfWeek, daysBetween,
   formatHuman, formatTime, inferYear, toDate, fromDate,
 } from '../lib/dates.js';
+
 import { findDates } from './grammar.js';
 
 /** Hours after midnight during which "tomorrow" is genuinely ambiguous. */
@@ -377,7 +378,7 @@ function checkTime(item, date, flags) {
 export function verifyItems(rawItems, ctx) {
   const out = [];
 
-  for (const raw of rawItems) {
+  for (let raw of rawItems) {
     if (!raw || typeof raw !== 'object') continue;
     const flags = [];
     let date = null;
@@ -429,6 +430,32 @@ export function verifyItems(rawItems, ctx) {
           options));
       }
       basis = basis === 'explicit' ? 'year_assumed' : basis;
+    }
+
+    // 2b. A document that names its own span is the better authority on which
+    //     year a bare month belongs to. "Academic Calendar 2026-27" puts March
+    //     in 2027, whatever the reader thought — and getting this wrong turns
+    //     every spring date into something that has "already gone", which is
+    //     both wrong and alarming.
+    if (date && ctx.documentSpan) {
+      const [y, mo, d] = date.split('-').map(Number);
+      const should = yearFromSpan(ctx.documentSpan, mo);
+      if (should && should !== y && isValidYMD(should, mo, d)) {
+        const corrected = iso(should, mo, d);
+        flags.push(flag('span_year', 'check',
+          `This document covers ${ctx.documentSpan}, which puts ${MONTH_NAMES[mo - 1]} in ${should}. I've read it as ${formatHuman(corrected)}.`,
+          [
+            { label: formatHuman(corrected), patch: { start_date: corrected } },
+            { label: `No, ${formatHuman(date)}`, patch: { start_date: date } },
+          ]));
+        // A range travels with its start: "15-19 March" must not end up
+        // starting in 2027 and finishing in 2026.
+        if (validISO(raw.end_date) && raw.end_date.slice(0, 4) === String(y)) {
+          const [, em, ed] = raw.end_date.split('-').map(Number);
+          if (isValidYMD(should, em, ed)) raw = { ...raw, end_date: iso(should, em, ed) };
+        }
+        date = corrected;
+      }
     }
 
     // 3. Everything that can disagree, made to disagree out loud.
@@ -576,7 +603,14 @@ function str(v) {
 function cleanTitle(v) {
   const s = str(v);
   if (!s) return '(untitled)';
-  return s.replace(/\s+/g, ' ').slice(0, 200);
+  // Printed calendars carry footnote marks against dates. They belong to the
+  // page, not to the thing happening, and "*" alone is not a title at all.
+  const cleaned = s
+    .replace(/^[\s*†‡§¶#•~^]+/, '')
+    .replace(/[\s*†‡§¶#•~^]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned.slice(0, 200) || '(untitled)';
 }
 
 export { SMALL_HOURS, FAR_FUTURE_DAYS };

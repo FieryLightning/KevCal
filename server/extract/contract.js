@@ -12,7 +12,7 @@
 
 export const ITEM_PROPERTIES = {
   title: { type: 'string', description: 'Short human title for the calendar entry. No dates inside it.' },
-  kind: { type: 'string', enum: ['event', 'deadline'], description: 'deadline = a moment to act BEFORE (due, closes, expires, return by, payment cut-off). Otherwise event.' },
+  kind: { type: 'string', enum: ['event', 'deadline'], description: 'deadline ONLY when the person reading this document must act before that moment — a payment they owe, a form they return, a registration that closes on them. An institution\'s internal obligations are not the reader\'s deadlines: "grades due", "first due date for final examinations", "reports due from staff" are scheduled events. When it is not clearly the reader\'s own obligation, choose event.' },
 
   start_date: { type: ['string', 'null'], description: 'YYYY-MM-DD, ONLY when the document prints an actual calendar date. null for anything relative or unstated.' },
   end_date: { type: ['string', 'null'], description: 'YYYY-MM-DD for the last day of a multi-day range, else null.' },
@@ -107,7 +107,11 @@ HARD RULES
 
 9. Read the whole page including footnotes and fine print. The dates that get missed in real life are the small ones under the main text.
 
-10. Titles are short, specific, and contain no dates. "Parents' evening", not "Parents' evening on 12 March".
+10. Titles are short, specific, and contain no dates. "Parents' evening", not "Parents' evening on 12 March". Leave footnote marks (*, †, ‡) out of the title — they belong to the page, not to the thing happening.
+
+11. The word "due" does not by itself make something a deadline. Ask who has to act: if the obligation belongs to the institution rather than to the person reading, it is an event. Most dates on a term calendar are events.
+
+12. If the document names the academic or financial year it covers ("2026-27"), every date belongs inside that span. A March date in a 2026-27 calendar is March 2027, not March 2026.
 
 BOXES
 

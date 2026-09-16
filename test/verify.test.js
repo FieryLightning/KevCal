@@ -260,6 +260,49 @@ group('a clean date stays quiet');
   check('and the wording is kept verbatim', JSON.parse(it.recurrence_suggestion).phrase === 'every other Tuesday');
 }
 
+group('a document that names its own year span is the authority');
+{
+  // The exact failure from a real 2026-27 academic calendar: spring dates filed
+  // a year early, so every one of them read as "already gone".
+  const it = run(read({
+    title: 'First due date for final examinations', start_date: '2026-03-15',
+    has_explicit_year: true, source_quote: 'March 15',
+  }), { documentSpan: '2026-27' });
+  check('a spring date in a 2026-27 calendar is moved to 2027', it.start_date === '2027-03-15', it.start_date);
+  check('and it is no longer in the past', !codes(it).includes('in_the_past'), JSON.stringify(codes(it)));
+  check('the correction is stated, not silent', codes(it).includes('span_year'));
+  check('with the reader\'s original one tap away',
+    flagOf(it, 'span_year').options.length === 2);
+
+  const autumn = run(read({ title: 'Term begins', start_date: '2026-09-28', has_explicit_year: true, source_quote: 'September 28' }),
+    { documentSpan: '2026-27' });
+  check('an autumn date in the same calendar is left alone',
+    autumn.start_date === '2026-09-28' && !codes(autumn).includes('span_year'), autumn.start_date);
+
+  const range = run(read({
+    title: 'Spring break', start_date: '2026-03-15', end_date: '2026-03-19',
+    has_explicit_year: true, source_quote: '15-19 March',
+  }), { documentSpan: '2026-27' });
+  check('a range travels with its start', range.start_date === '2027-03-15' && range.end_date === '2027-03-19',
+    `${range.start_date} → ${range.end_date}`);
+
+  const noSpan = run(read({ title: 'Something', start_date: '2026-03-15', has_explicit_year: true, source_quote: 'March 15' }));
+  check('without a span nothing is moved', noSpan.start_date === '2026-03-15');
+}
+
+group('footnote marks are not titles');
+{
+  check('a leading asterisk is stripped',
+    run(read({ title: '*First due date for final examinations', start_date: '2027-03-10', source_quote: 'x' })).title
+      === 'First due date for final examinations');
+  check('a title that is only a mark is not a title',
+    run(read({ title: '*', start_date: '2027-03-15', source_quote: 'x' })).title === '(untitled)');
+  check('a dagger goes too',
+    run(read({ title: '† Reading day', start_date: '2027-04-30', source_quote: 'x' })).title === 'Reading day');
+  check('an asterisk inside a title is left alone',
+    run(read({ title: 'Grade 5*A results', start_date: '2027-04-30', source_quote: 'x' })).title === 'Grade 5*A results');
+}
+
 // ─────────────────────────────────────────────── plumbing
 
 group('geometry and spans');
