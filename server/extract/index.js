@@ -179,6 +179,53 @@ function annotateBuiltItems(items, ctx) {
 }
 
 /**
+ * The same row, read twice.
+ *
+ * A dense calendar makes a reader emit near-duplicates: one item for "17-19
+ * September" and another for the same phrase read slightly differently. They
+ * are not two commitments, and 72 entries where the document has 36 is worse
+ * than useless — you stop trusting the list.
+ *
+ * Two items are the same thing when they carry the same title and start within
+ * a week of each other. The survivor is whichever reading is more plausible: a
+ * sane span beats an absurd one, then fewer doubts, then more confidence.
+ */
+function dropDuplicates(items) {
+  const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const days = (a, b) => Math.abs(Math.round((new Date(`${b}T00:00:00Z`) - new Date(`${a}T00:00:00Z`)) / 86400000));
+
+  const plausibility = (i) => {
+    let score = Number(i.confidence) || 0;
+    if (i.start_date && i.end_date) {
+      const span = days(i.start_date, i.end_date);
+      if (span > 60) score -= 2;          // a year-long "orientation" is a misread
+      else if (span > 0) score += 0.2;    // a real range beats losing one
+    }
+    score -= (i.flags || []).length * 0.05;
+    if ((i.flags || []).some((f) => f.level === 'blocker')) score -= 0.5;
+    return score;
+  };
+
+  const kept = [];
+  let removed = 0;
+  for (const item of items) {
+    const key = norm(item.title);
+    if (!key) { kept.push(item); continue; }
+    const twin = kept.find((k) => norm(k.title) === key && (
+      (!k.start_date && !item.start_date)
+      // 14 days: a real academic calendar repeats a title once per TERM, which is
+      // 80 days or more apart. Anything closer than a fortnight sharing a title is
+      // the same row read twice.
+      || (k.start_date && item.start_date && days(k.start_date, item.start_date) <= 14)
+    ));
+    if (!twin) { kept.push(item); continue; }
+    removed++;
+    if (plausibility(item) > plausibility(twin)) kept[kept.indexOf(twin)] = item;
+  }
+  return { items: kept, removed };
+}
+
+/**
  * A title repeated across a lot of dates almost always means the page was a
  * table and the columns did not line up — every row ends up labelled with the
  * page header instead of its own text. It is the single most common way a
@@ -315,6 +362,8 @@ export async function extract(opts) {
     }
   }
 
+  const deduped = dropDuplicates(items);
+  items = deduped.items;
   flagRepeatedTitles(items);
   for (const item of items) item.fingerprint = fingerprint(item);
 
@@ -325,7 +374,7 @@ export async function extract(opts) {
     doc,
     anchor: anchorUsed,
     questions,
-    stats,
+    stats: { ...stats, duplicates_dropped: deduped.removed },
     risk: assessRisk(items),
     engine: engineParts.join('+') || 'none',
     now,

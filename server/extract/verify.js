@@ -443,6 +443,35 @@ export function verifyItems(rawItems, ctx) {
     const { start, end } = checkTime(raw, date, flags);
 
     let endDate = validISO(raw.end_date) ? raw.end_date : null;
+
+    // An academic calendar is full of two- and three-day entries, and a reader
+    // that gets the year wrong on the END of a range turns "17-19 September"
+    // into a 367-day orientation. The start is nearly always right, so when
+    // moving the end into the start's year produces a sane span, that is what
+    // the document meant.
+    if (date && endDate) {
+      const span = daysBetween(date, endDate);
+      if (span > 60) {
+        const [, em, ed] = endDate.split('-').map(Number);
+        const startYear = Number(date.slice(0, 4));
+        const sameYear = isValidYMD(startYear, em, ed) ? iso(startYear, em, ed) : null;
+        const shortened = sameYear ? daysBetween(date, sameYear) : null;
+        if (shortened !== null && shortened >= 0 && shortened <= 60) {
+          flags.push(flag('long_span', 'check',
+            `That would run ${span} days. The year on the end date looks wrong, so I've read it as ${human(sameYear)}.`,
+            [
+              { label: `Ends ${human(sameYear)}`, patch: { end_date: sameYear } },
+              { label: `No, ${formatHuman(endDate)}`, patch: { end_date: endDate } },
+            ]));
+          endDate = sameYear;
+        } else {
+          flags.push(flag('long_span', 'check',
+            `This runs for ${span} days, which is usually a misread end date rather than a long event.`,
+            [{ label: 'Just the one day', patch: { end_date: null } }]));
+        }
+      }
+    }
+
     if (endDate && date && endDate < date) {
       flags.push(flag('end_date_before_start', 'blocker',
         `The end (${human(endDate)}) is before the start (${human(date)}).`));

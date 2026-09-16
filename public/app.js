@@ -598,6 +598,18 @@ function renderReview({ silent = false } = {}) {
   if (src.diff?.description) {
     banner += `<div class="banner">Compared with the earlier version: ${esc(src.diff.description)}</div>`;
   }
+  // A term calendar is a schedule, but it is full of the words that mean
+  // deadline — "last day for", "grades due". Each one then carries a five-step
+  // reminder ladder, and twenty of those is not a calendar, it is an alarm
+  // clock. Offer to retype the lot in one go.
+  const dues = items.filter((i) => i.kind === 'deadline');
+  if (dues.length >= 3) {
+    banner += `<div class="banner warn" id="kindBanner">
+      <b>${dues.length} of these are set as deadlines</b>, so each gets several reminders counting down.
+      On a schedule you usually just want the day itself.
+      <div class="opts"><button class="opt" id="allEvents" type="button">Make them all events</button></div>
+    </div>`;
+  }
   $('#diffBanner').innerHTML = banner;
 
   const ordered = [...blockers,
@@ -608,6 +620,16 @@ function renderReview({ silent = false } = {}) {
     ? ordered.map((i, n) => itemCard(i, { delay: n, showFlags: true })).join('')
     : '';
   wireItemCards($('#reviewList'), items);
+
+  const allEvents = $('#allEvents');
+  if (allEvents) allEvents.addEventListener('click', async () => {
+    haptic(12);
+    const ids = items.filter((i) => i.kind === 'deadline').map((i) => i.id);
+    const res = await api('/api/items/bulk', { method: 'POST', body: { op: 'set_kind', kind: 'event', ids } });
+    if (res.error) return toast(res.error);
+    toast(`${res.affected} changed to events`);
+    reloadReview();
+  });
 
   const addable = items.filter((i) => i.status !== 'rejected');
   const btn = $('#btnAdd');

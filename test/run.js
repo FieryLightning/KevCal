@@ -324,6 +324,64 @@ try {
   const missing = await api('/api/batches/does-not-exist');
   check('unknown batch 404s', missing.status === 404);
 
+  console.log('\na dense academic calendar');
+  {
+    const ev = (t, d, e) => ({
+      title: t, kind: 'event', start_date: d, end_date: e || null,
+      has_explicit_year: true, am_pm_stated: true, confidence: 0.92, source_quote: t,
+    });
+    reads({ document_title: 'Academic Calendar 2026-27', document_span: '2026-27', items: [
+      // The same row read twice, which is what a dense two-column page produces.
+      ev('International Student Orientation', '2026-09-17', '2026-09-19'),
+      ev('International Student Orientation', '2026-09-16', '2027-09-18'),
+      ev('New Student Check-In', '2026-09-19'),
+      ev('New Student Check-In', '2026-09-19'),
+      // Legitimately once per term, ~3 months apart. These must all survive.
+      ev('Beginning of instruction', '2026-09-28'),
+      ev('Beginning of instruction', '2027-01-04'),
+      ev('Beginning of instruction', '2027-03-29'),
+      ev('Spring break', '2027-03-22', '2027-03-26'),
+    ] });
+    const cal = await api('/api/capture', { method: 'POST', body: {
+      kind: 'text', text: 'x', now: '2026-09-16T10:00', tz: 'America/New_York',
+    } });
+    const items = cal.data.items;
+    const titled = (t) => items.filter((i) => i.title === t);
+
+    check('the row read twice becomes one entry', titled('International Student Orientation').length === 1,
+      String(titled('International Student Orientation').length));
+    check('and the sane reading is the one kept',
+      titled('International Student Orientation')[0].end_date === '2026-09-19',
+      titled('International Student Orientation')[0].end_date);
+    check('an exact repeat collapses too', titled('New Student Check-In').length === 1);
+    check('it reports how many it dropped', cal.data.stats.duplicates_dropped === 2,
+      String(cal.data.stats.duplicates_dropped));
+
+    check('a title that recurs once per term is NOT collapsed',
+      titled('Beginning of instruction').length === 3,
+      titled('Beginning of instruction').map((i) => i.start_date).join(', '));
+    check('a genuine multi-day range survives intact',
+      titled('Spring break')[0].end_date === '2027-03-26');
+    check('nothing runs longer than the term it is in',
+      items.every((i) => !i.end_date
+        || (new Date(i.end_date) - new Date(i.start_date)) / 864e5 <= 60));
+    await api(`/api/batches/${cal.data.batch.id}`, { method: 'DELETE' });
+
+    // The same misread, on its own, must be corrected rather than dropped.
+    reads({ items: [ev('Orientation week', '2026-09-17', '2027-09-19')] });
+    const lone = await api('/api/capture', { method: 'POST', body: {
+      kind: 'text', text: 'x', now: '2026-09-16T10:00',
+    } });
+    const one = lone.data.items[0];
+    check('a lone year-long range has its end year corrected', one.end_date === '2026-09-19', one.end_date);
+    check('and says so rather than doing it quietly',
+      (one.flags || []).some((f) => f.code === 'long_span'),
+      JSON.stringify((one.flags || []).map((f) => f.code)));
+    check('with the original one tap away',
+      (one.flags || []).find((f) => f.code === 'long_span').options.length === 2);
+    await api(`/api/batches/${lone.data.batch.id}`, { method: 'DELETE' });
+  }
+
   console.log('\na re-issued document is one calendar, not three');
   {
     const term = (items) => reads({ document_title: 'Academic calendar', items });
