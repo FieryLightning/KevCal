@@ -4,6 +4,7 @@
 // version, and "show me where this came from" needs the source crop.
 
 import { DatabaseSync } from 'node:sqlite';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -147,8 +148,15 @@ addColumn('batches', 'captured_at_local TEXT', 'captured_at_local');
 
 export function nowISO() { return new Date().toISOString(); }
 
+/**
+ * These identifiers name stored documents: /api/source/<batch id> serves a
+ * photograph of somebody's post. Math.random is a predictable PRNG whose
+ * internal state can be recovered from a handful of its own outputs, which is
+ * the wrong thing to build a document's name out of, however unlikely the
+ * attack. Share tokens were already crypto-random; now everything is.
+ */
 export function id(prefix = '') {
-  return prefix + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+  return prefix + crypto.randomBytes(9).toString('base64url');
 }
 
 export function log(action, { batch_id = null, item_id = null, detail = null } = {}) {
