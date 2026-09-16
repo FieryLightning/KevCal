@@ -593,3 +593,18 @@ input[type=date], input[type=time] { min-height: 44px; }
 .guide-link h3 { display: flex; align-items: center; gap: 8px; }
 a.btn { text-decoration: none; display: inline-block; }
 a.icon-btn { text-decoration: none; font-weight: 700; color: var(--brand); }
+
+/* A row in the comparison between two versions of the same document. Tapping it
+   decides whether that one change is applied; nothing is applied until you say. */
+.diffrow { cursor: pointer; align-items: center; }
+.diffrow .tick {
+  flex: 0 0 auto; width: 26px; height: 26px; border-radius: 7px;
+  border: 1.5px solid var(--line-2); display: grid; place-items: center;
+  font-size: 15px; font-weight: 700; color: #fff; background: var(--surface-2);
+  transition: background .16s, border-color .16s;
+}
+.diffrow.on .tick { background: var(--brand); border-color: var(--brand); }
+.diffrow:not(.on) { opacity: .62; }
+.diffrow .item-meta { display: block; }
+.diffrow .item-meta span { display: block; margin-top: 2px; }
+.diffrow .item-meta b { color: var(--ink); }

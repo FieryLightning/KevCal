@@ -324,6 +324,65 @@ try {
   const missing = await api('/api/batches/does-not-exist');
   check('unknown batch 404s', missing.status === 404);
 
+  console.log('\na re-issued document is one calendar, not three');
+  {
+    const term = (items) => reads({ document_title: 'Academic calendar', items });
+    const date = (t, d) => ({
+      title: t, kind: 'event', start_date: d, has_explicit_year: true,
+      am_pm_stated: true, confidence: 0.95, source_quote: t + ' ' + d,
+    });
+
+    term([date('First class', '2027-01-11'), date('Spring break', '2027-03-15'), date('Add drop', '2027-01-22')]);
+    const v1 = await api('/api/capture', { method: 'POST', body: { kind: 'text', text: 'x', now: '2026-09-15T10:00' } });
+    await api(`/api/batches/${v1.data.batch.id}/commit`, { method: 'POST' });
+    check('the first version imports', v1.data.items.length === 3);
+
+    // The school re-issues it: one date moves, one appears, one disappears.
+    term([date('First class', '2027-01-11'), date('Spring break', '2027-03-22'), date('Reading day', '2027-04-30')]);
+    const v2 = await api('/api/capture', { method: 'POST', body: {
+      kind: 'text', text: 'x', now: '2026-09-15T10:00', parentBatchId: v1.data.batch.id,
+    } });
+    const d = v2.data.diff;
+    check('it is compared, not duplicated', !!d, 'no diff came back');
+    check('the moved date reads as a change', d.summary.changed === 1, JSON.stringify(d.summary));
+    check('the new date reads as an addition', d.summary.added === 1);
+    check('the dropped date reads as gone', d.summary.removed === 1);
+    check('and the untouched one is left alone', d.summary.unchanged === 1);
+
+    const accept = [
+      ...d.changed.map((c) => ({ op: 'change', newItemId: c.after.id, targetId: c.before.id })),
+      ...d.added.map((x) => ({ op: 'add', newItemId: x.id })),
+      ...d.removed.map((x) => ({ op: 'remove', targetId: x.id })),
+    ];
+    const applied = await api(`/api/batches/${v2.data.batch.id}/apply-diff`, { method: 'POST', body: { accept } });
+    check('applying it succeeds', applied.status === 200, applied.text.slice(0, 120));
+
+    const orig = (await api(`/api/batches/${v1.data.batch.id}`)).data.items;
+    check('the moved date is updated IN PLACE, not added again',
+      orig.find((i) => i.title === 'Spring break')?.start_date === '2027-03-22',
+      orig.find((i) => i.title === 'Spring break')?.start_date);
+    check('the dropped date is superseded, not destroyed',
+      orig.find((i) => i.title === 'Add drop')?.status === 'superseded');
+
+    const whole = await api(`/api/batches/${v1.data.batch.id}?lineage=1`);
+    const live = whole.data.items.filter((i) => i.status === 'accepted');
+    check('opening the calendar shows every version at once', live.length === 3,
+      live.map((i) => i.title).join(', '));
+    check('including the date only the revision knew about',
+      live.some((i) => i.title === 'Reading day'));
+    check('it reports how many versions there are', whole.data.revisions === 1, String(whole.data.revisions));
+
+    await api(`/api/batches/${v1.data.batch.id}/undo?lineage=1`, { method: 'POST' });
+    const afterUndo = (await api(`/api/batches/${v1.data.batch.id}?lineage=1`)).data.items;
+    check('undo takes back the whole calendar, revisions included',
+      afterUndo.every((i) => i.status !== 'accepted'),
+      afterUndo.filter((i) => i.status === 'accepted').map((i) => i.title).join(', '));
+
+    const del = await api(`/api/batches/${v1.data.batch.id}?lineage=1`, { method: 'DELETE' });
+    check('deleting it removes every version', del.data.deleted === 2, JSON.stringify(del.data));
+    check('nothing is left behind', (await api(`/api/batches/${v2.data.batch.id}`)).status === 404);
+  }
+
   {
     console.log('\nyour own calendar, as a live feed');
     const myFeed = await api('/api/feed');

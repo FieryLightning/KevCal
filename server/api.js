@@ -257,10 +257,34 @@ export function listBatches(req, res) {
   json(res, 200, { batches: rows });
 }
 
-export function getBatchHandler(req, res, batchId) {
+/**
+ * An import and every later version of it. A school calendar re-issued twice is
+ * one thing in a person's head, so undo, delete and "open" have to treat it as
+ * one thing too — otherwise the group quietly scatters across rows, and dates
+ * added by a revision survive deleting what you think is the whole calendar.
+ */
+export function lineageIds(rootId) {
+  const out = [rootId];
+  const children = db.prepare('SELECT id FROM batches WHERE parent_id = ?');
+  for (let i = 0; i < out.length && out.length < 500; i++) {
+    for (const row of children.all(out[i])) if (!out.includes(row.id)) out.push(row.id);
+  }
+  return out;
+}
+
+export function getBatchHandler(req, res, batchId, url) {
   const batch = getBatch(batchId);
   if (!batch) return notFound(res, 'batch not found');
-  json(res, 200, { batch, items: getItems(batchId).map(decorate) });
+  if (url?.searchParams.get('lineage') !== '1') {
+    return json(res, 200, { batch, items: getItems(batchId).map(decorate) });
+  }
+  const ids = lineageIds(batchId);
+  const marks = ids.map(() => '?').join(',');
+  const items = db.prepare(
+    `SELECT * FROM items WHERE batch_id IN (${marks})
+     ORDER BY blocked DESC, needs_review DESC, start_date ASC`,
+  ).all(...ids).map(decorate);
+  json(res, 200, { batch, items, lineage: ids, revisions: ids.length - 1 });
 }
 
 export async function commitBatch(req, res, batchId) {
@@ -296,9 +320,22 @@ export async function commitBatch(req, res, batchId) {
 }
 
 /** One button that takes back an entire import — the single most requested feature. */
-export function undoBatch(req, res, batchId) {
+export function undoBatch(req, res, batchId, url) {
   const batch = getBatch(batchId);
   if (!batch) return notFound(res, 'batch not found');
+  // Undoing "the school calendar" has to take back the revisions too.
+  if (url?.searchParams.get('lineage') === '1') {
+    const ids = lineageIds(batchId);
+    const at2 = nowISO();
+    const marks = ids.map(() => '?').join(',');
+    const removed = db.prepare(
+      `UPDATE items SET status='rejected', undo_marked=1, updated_at=?
+       WHERE batch_id IN (${marks}) AND status != 'rejected'`,
+    ).run(at2, ...ids).changes;
+    db.prepare(`UPDATE batches SET status='undone', undone_at=? WHERE id IN (${marks})`).run(at2, ...ids);
+    log('undo', { batch_id: batchId, detail: { count: removed, lineage: ids.length } });
+    return json(res, 200, { ok: true, removed });
+  }
   const at = nowISO();
   // Mark only what this undo actually took away, so redo cannot resurrect
   // something the user had deliberately rejected.
@@ -322,9 +359,31 @@ export function redoBatch(req, res, batchId) {
   json(res, 200, { ok: true, restored: n });
 }
 
-export function deleteBatch(req, res, batchId) {
+export function deleteBatch(req, res, batchId, url) {
   const batch = getBatch(batchId);
   if (!batch) return notFound(res, 'batch not found');
+  // Deleting the calendar means the whole lineage, newest revisions first, so a
+  // foreign key never points at something already gone.
+  if (url?.searchParams.get('lineage') === '1') {
+    const ids = lineageIds(batchId).reverse();
+    for (const one of ids) {
+      const row = getBatch(one);
+      if (!row) continue;
+      db.exec('BEGIN');
+      try {
+        db.prepare('UPDATE batches SET parent_id = NULL WHERE parent_id = ?').run(one);
+        db.prepare('DELETE FROM items WHERE batch_id = ?').run(one);
+        db.prepare('DELETE FROM shares WHERE batch_id = ?').run(one);
+        db.prepare('DELETE FROM batches WHERE id = ?').run(one);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); return json(res, 500, { error: `could not delete: ${e.message}` }); }
+      if (row.source_path) {
+        try { fs.unlinkSync(path.join(ORIGINALS_DIR, row.source_path)); } catch { /* already gone */ }
+      }
+    }
+    log('delete_batch', { batch_id: batchId, detail: { lineage: ids.length } });
+    return json(res, 200, { ok: true, deleted: ids.length });
+  }
 
   // All-or-nothing, and the image goes only after the rows are safely gone —
   // otherwise a failed delete leaves a batch listed with its source destroyed.

@@ -384,8 +384,16 @@ async function runCapture(payload, previewURL) {
 
   const res = await api('/api/capture', {
     method: 'POST',
-    body: { ...payload, now: localNow(), tz: timezone() },
+    body: {
+      ...payload,
+      now: localNow(),
+      tz: timezone(),
+      // Set when you picked "Update" on an existing import: the server then
+      // reconciles against it rather than giving you two of everything.
+      parentBatchId: state.updatingBatch || undefined,
+    },
   });
+  state.updatingBatch = null;
   if (cancelled) return;
   stopScan();
 
@@ -422,8 +430,137 @@ function showReview(res) {
   state.batch = res.batch;
   state.items = res.items || [];
   state.lastResponse = res;
-  renderReview();
+  if (res.diff) renderDiff(res); else renderReview();
   openOverlay($('#review'));
+}
+
+const FIELD_NAMES = {
+  start_date: 'date', start_time: 'starts', end_date: 'ends', end_time: 'ends',
+  title: 'name', location: 'where', kind: 'kind', all_day: 'all day',
+};
+
+function fieldValue(field, v) {
+  if (v === null || v === undefined || v === '') return 'nothing';
+  if (field === 'start_date' || field === 'end_date') return whenLabel(v);
+  if (field === 'all_day') return v ? 'yes' : 'no';
+  return String(v);
+}
+
+/**
+ * A re-issued document, next to the one you already have.
+ *
+ * Nothing here is applied until you press the button: a school sending a
+ * corrected calendar should not be able to silently rewrite what is already in
+ * yours, and anything you fixed by hand is held back by default rather than
+ * being quietly overwritten by the new version.
+ */
+function renderDiff(res) {
+  const d = res.diff;
+  state.diff = d;
+  state.picked = new Set();
+
+  const row = (key, title, detail, on = true) => {
+    if (on) state.picked.add(key);
+    return `<div class="item diffrow ${on ? 'on' : ''}" role="button" tabindex="0" data-pick="${key}">
+      <div class="tick">${on ? '✓' : ''}</div>
+      <div class="item-main">
+        <div class="item-title">${esc(title)}</div>
+        <div class="item-meta">${detail}</div>
+      </div>
+    </div>`;
+  };
+
+  const groups = [];
+
+  if (d.changed.length) {
+    groups.push('<div class="section-label">Moved or corrected</div>' + d.changed.map((c) => row(
+      'c:' + c.after.id + ':' + c.before.id,
+      c.after.title,
+      c.changes.map((ch) => `<span>${FIELD_NAMES[ch.field] || ch.field}: ${esc(fieldValue(ch.field, ch.from))} → <b>${esc(fieldValue(ch.field, ch.to))}</b></span>`).join(''),
+    )).join(''));
+  }
+  if (d.added.length) {
+    groups.push('<div class="section-label">New in this version</div>' + d.added.map((a) => row(
+      'a:' + a.id, a.title,
+      `<span>${whenLabel(a.start_date)}</span>` + (a.blocked ? '<span class="kindtag">needs an answer first</span>' : ''),
+      !a.blocked,
+    )).join(''));
+  }
+  if (d.removed.length) {
+    groups.push('<div class="section-label">Gone from this version</div>' + d.removed.map((r) => row(
+      'r:' + r.id, r.title, `<span>${whenLabel(r.start_date)} — would be taken out</span>`,
+    )).join(''));
+  }
+  if (d.conflicts.length) {
+    groups.push('<div class="section-label">You edited these — kept as they are</div>' + d.conflicts.map((c) => row(
+      'f:' + c.after.id + ':' + c.before.id,
+      c.after.title,
+      `<span>your version: ${esc(whenLabel(c.before.start_date))} · new version: ${esc(whenLabel(c.after.start_date))}</span>`,
+      false,
+    )).join(''));
+  }
+  if (d.unchanged.length) {
+    groups.push(`<div class="section-label">Unchanged</div>
+      <div class="banner">${d.unchanged.length} date${d.unchanged.length === 1 ? '' : 's'} are the same in both versions and are left alone.</div>`);
+  }
+
+  $('#reviewTitle').textContent = 'Updated version';
+  $('#foundCount').textContent = d.summary.changed + d.summary.added + d.summary.removed;
+  $('#foundLabel').textContent = 'things to change';
+  $('#foundSub').textContent = d.summary.unchanged + ' unchanged';
+  $('#diffBanner').innerHTML = `<div class="banner">${esc(d.description)}</div>`;
+  $('#reviewList').innerHTML = groups.join('') || '<div class="banner">Nothing has changed since the last version.</div>';
+
+  $$('.diffrow', $('#reviewList')).forEach((el) => {
+    const toggle = () => {
+      const key = el.dataset.pick;
+      if (state.picked.has(key)) { state.picked.delete(key); el.classList.remove('on'); $('.tick', el).textContent = ''; }
+      else { state.picked.add(key); el.classList.add('on'); $('.tick', el).textContent = '✓'; }
+      haptic();
+      updateDiffButton();
+    };
+    el.addEventListener('click', toggle);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+  });
+
+  $('#btnDiscard').textContent = 'Keep what I have';
+  $('#btnDiscard').onclick = async () => {
+    await api(`/api/batches/${state.batch.id}`, { method: 'DELETE' });
+    closeOverlay($('#review'));
+    toast('Left alone — nothing changed');
+    go('imports');
+  };
+  $('#btnAdd').onclick = applyDiff;
+  updateDiffButton();
+}
+
+function updateDiffButton() {
+  const n = state.picked.size;
+  const btn = $('#btnAdd');
+  btn.disabled = n === 0;
+  btn.textContent = n === 0 ? 'Nothing selected' : `Apply ${n} change${n === 1 ? '' : 's'}`;
+}
+
+async function applyDiff() {
+  const accept = [];
+  for (const key of state.picked) {
+    const [kind, a, b] = key.split(':');
+    if (kind === 'c') accept.push({ op: 'change', newItemId: a, targetId: b });
+    if (kind === 'f') accept.push({ op: 'change', newItemId: a, targetId: b, force: true });
+    if (kind === 'a') accept.push({ op: 'add', newItemId: a });
+    if (kind === 'r') accept.push({ op: 'remove', targetId: a });
+  }
+  const res = await api(`/api/batches/${state.batch.id}/apply-diff`, { method: 'POST', body: { accept } });
+  if (res.error) return toast(res.error);
+  haptic(30);
+  closeOverlay($('#review'));
+  const bits = [];
+  if (res.changed) bits.push(`${res.changed} updated`);
+  if (res.added) bits.push(`${res.added} added`);
+  if (res.removed) bits.push(`${res.removed} taken out`);
+  if (res.blocked) bits.push(`${res.blocked} still need an answer`);
+  toast(bits.join(', ') || 'Nothing to change');
+  go('dates');
 }
 
 async function reloadReview() {
@@ -644,36 +781,63 @@ async function loadImports() {
     list.innerHTML = `<div class="empty"><b>No imports yet</b>Every capture shows up here, and every one can be undone whole.</div>`;
     return;
   }
-  list.innerHTML = batches.map((b) => {
-    const when = new Date(b.created_at);
-    const undone = b.status === 'undone';
+  // An import and its later versions are one thing to a person — "the school
+  // calendar" — so they are one row here, however many times it was re-issued.
+  const byId = new Map(batches.map((x) => [x.id, x]));
+  const rootOf = (x) => {
+    let cur = x;
+    const seen = new Set();
+    while (cur.parent_id && byId.has(cur.parent_id) && !seen.has(cur.id)) { seen.add(cur.id); cur = byId.get(cur.parent_id); }
+    return cur;
+  };
+  const groups = new Map();
+  for (const x of batches) {
+    const root = rootOf(x);
+    if (!groups.has(root.id)) groups.set(root.id, { root, all: [] });
+    groups.get(root.id).all.push(x);
+  }
+
+  list.innerHTML = [...groups.values()].map(({ root, all }) => {
+    const revisions = all.length - 1;
+    const kept = all.reduce((n, x) => n + (x.accepted_count || 0), 0);
+    const total = all.reduce((n, x) => n + (x.item_count || 0), 0);
+    const newest = all.map((x) => x.created_at).sort().at(-1);
+    const when = new Date(newest);
+    const undone = all.every((x) => x.status === 'undone');
     return `<div class="card">
-      <h3>${esc(b.title)}</h3>
+      <h3>${esc(root.title)}</h3>
       <div class="item-meta" style="margin-bottom:10px">
         <span>${when.toLocaleDateString()} ${when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
-        <span>${b.accepted_count || 0} of ${b.item_count || 0} kept</span>
-        <span>${esc(b.engine)}</span>
+        <span>${kept} of ${total} kept</span>
+        ${revisions ? `<span class="kindtag">updated ${revisions}×</span>` : ''}
         ${undone ? '<span class="kindtag">UNDONE</span>' : ''}
       </div>
       <div class="row">
-        <button class="btn" data-open="${b.id}" type="button">Open</button>
+        <button class="btn" data-open="${root.id}" type="button">Open</button>
+        <button class="btn" data-update="${root.id}" type="button">Update</button>
         ${undone
-          ? `<button class="btn" data-redo="${b.id}" type="button">Restore</button>`
-          : `<button class="btn" data-undo="${b.id}" type="button">Undo</button>`}
-        <button class="btn" data-share="${b.id}" type="button">Share</button>
-        <button class="btn ghost" data-del="${b.id}" type="button">Delete</button>
+          ? `<button class="btn" data-redo="${root.id}" type="button">Restore</button>`
+          : `<button class="btn" data-undo="${root.id}" type="button">Undo</button>`}
+        <button class="btn" data-share="${root.id}" type="button">Share</button>
+        <button class="btn ghost" data-del="${root.id}" type="button">Delete</button>
       </div>
     </div>`;
   }).join('');
 
   $$('[data-open]', list).forEach((b) => b.onclick = async () => {
-    const res = await api(`/api/batches/${b.dataset.open}`);
+    const res = await api(`/api/batches/${b.dataset.open}?lineage=1`);
     if (res.error) return toast(res.error);
     state.lastResponse = {};
     showReview(res);
   });
+  $$('[data-update]', list).forEach((b) => b.onclick = () => {
+    state.updatingBatch = b.dataset.update;
+    haptic();
+    toast('Now capture the new version of it');
+    openOverlay($('#chooser'));
+  });
   $$('[data-undo]', list).forEach((b) => b.onclick = async () => {
-    const r = await api(`/api/batches/${b.dataset.undo}/undo`, { method: 'POST' });
+    const r = await api(`/api/batches/${b.dataset.undo}/undo?lineage=1`, { method: 'POST' });
     toast(`Took back ${r.removed} date${r.removed === 1 ? '' : 's'}`, {
       label: 'Restore',
       run: async () => { await api(`/api/batches/${b.dataset.undo}/redo`, { method: 'POST' }); loadImports(); },
@@ -687,8 +851,8 @@ async function loadImports() {
   });
   $$('[data-share]', list).forEach((b) => b.onclick = () => openShare({ batchId: b.dataset.share }));
   $$('[data-del]', list).forEach((b) => b.onclick = async () => {
-    if (!confirm('Delete this import and its original image? This cannot be undone.')) return;
-    await api(`/api/batches/${b.dataset.del}`, { method: 'DELETE' });
+    if (!confirm('Delete this and every version of it, including the original images? This cannot be undone.')) return;
+    await api(`/api/batches/${b.dataset.del}?lineage=1`, { method: 'DELETE' });
     toast('Deleted');
     loadImports();
   });
