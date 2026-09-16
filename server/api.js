@@ -212,9 +212,84 @@ async function captureCore(body) {
       readerAvailable: result.readerAvailable,
       usedReader: result.usedReader,
       budget: result.budget,
+      // Only when the user did not already say which import this updates.
+      suggestedParent: body.parentBatchId ? null : suggestParent(batchId, items),
       diff,
     },
   };
+}
+
+/**
+ * Has this document been read here before?
+ *
+ * Re-reading a term calendar should update the one you have, not add a second
+ * copy of the same term. Asking the user to remember to press "Update" first
+ * means that on the day they forget, they get duplicates — so KevCal looks for
+ * itself, by comparing the new dates against what is already here.
+ *
+ * It only ever offers. Silently merging two documents that happened to share
+ * dates would be far worse than an extra import.
+ */
+function suggestParent(newBatchId, items) {
+  const dated = items.filter((i) => i.start_date);
+  if (dated.length < 2) return null;
+
+  const candidates = db.prepare(`
+    SELECT id, title, created_at FROM batches
+    WHERE id != ? AND status = 'committed' ORDER BY created_at DESC LIMIT 20
+  `).all(newBatchId);
+
+  let best = null;
+  for (const c of candidates) {
+    const theirs = getItems(c.id).filter((i) => i.status === 'accepted' && i.start_date);
+    if (theirs.length < 2) continue;
+    const d = diffItems(theirs, dated);
+    const shared = d.summary.unchanged + d.summary.changed;
+    const overlap = shared / Math.max(theirs.length, dated.length);
+    // Two in five dates in common is far past coincidence for dated documents.
+    if (overlap >= 0.4 && (!best || overlap > best.overlap)) {
+      best = { id: c.id, title: c.title, read_at: c.created_at, overlap, shared, description: describeDiff(d) };
+    }
+  }
+  return best;
+}
+
+/**
+ * Adopt an existing import as this one's parent, turning a fresh capture into a
+ * revision of it. Done here rather than by capturing again, because reading the
+ * page a second time would cost another call for an answer we already have.
+ */
+export async function linkParent(req, res, batchId) {
+  const batch = getBatch(batchId);
+  if (!batch) return notFound(res, 'batch not found');
+  let body;
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
+  const parent = body?.parentId ? getBatch(body.parentId) : null;
+  if (!parent) return notFound(res, 'that import no longer exists');
+  if (parent.id === batchId) return badRequest(res, 'an import cannot be a version of itself');
+  if (lineageIds(batchId).includes(parent.id)) {
+    return badRequest(res, 'that would make a loop of versions');
+  }
+  db.prepare('UPDATE batches SET parent_id = ? WHERE id = ?').run(parent.id, batchId);
+  log('link_parent', { batch_id: batchId, detail: parent.id });
+
+  const items = getItems(batchId).map(decorate);
+  const parentItems = getItems(parent.id).filter((i) => i.status !== 'rejected');
+  const d = diffItems(parentItems, items);
+  json(res, 200, { ok: true, batch: getBatch(batchId), items, diff: { ...d, description: describeDiff(d) } });
+}
+
+/** Rename an import, so "which school" is answerable months later. */
+export async function renameBatch(req, res, batchId) {
+  const batch = getBatch(batchId);
+  if (!batch) return notFound(res, 'batch not found');
+  let body;
+  try { body = await readJSON(req); } catch (e) { return fromBodyError(res, e); }
+  const title = String(body?.title ?? '').trim();
+  if (!title || title.length > 200) return badRequest(res, 'give it a name, up to 200 characters');
+  db.prepare('UPDATE batches SET title = ? WHERE id = ?').run(title, batchId);
+  log('rename_batch', { batch_id: batchId, detail: title });
+  json(res, 200, { ok: true, batch: getBatch(batchId) });
 }
 
 /**
@@ -690,7 +765,12 @@ export function agenda(req, res, url) {
   const from = url.searchParams.get('from') || addDays(today(), -30);
   const to = url.searchParams.get('to') || addDays(today(), 400);
   const includeUndone = url.searchParams.get('all') === '1';
-  const statusClause = includeUndone ? '' : "AND i.status = 'accepted'";
+  // 'kept' is everything you decided to keep, whether or not you put it on the
+  // calendar: nothing captured is ever thrown away just because you skipped it.
+  const include = url.searchParams.get('include');
+  const statusClause = includeUndone ? ''
+    : include === 'kept' ? "AND i.status IN ('accepted', 'pending')"
+    : "AND i.status = 'accepted'";
   const rows = db.prepare(`
     SELECT i.*, b.title AS batch_title, b.source_path AS batch_source
     FROM items i JOIN batches b ON b.id = i.batch_id

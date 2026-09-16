@@ -324,6 +324,61 @@ try {
   const missing = await api('/api/batches/does-not-exist');
   check('unknown batch 404s', missing.status === 404);
 
+  console.log('\nkeeping a copy, and recognising a re-read');
+  {
+    const ev = (t, d) => ({
+      title: t, kind: 'event', start_date: d, has_explicit_year: true,
+      am_pm_stated: true, confidence: 0.95, source_quote: t,
+    });
+    const spring = [ev('First class', '2027-01-11'), ev('Spring break', '2027-03-15'),
+                    ev('Final week', '2027-05-03'), ev('Commencement', '2027-06-11')];
+    reads({ document_title: 'Springfield High — Spring 2027', items: spring });
+    const first = await api('/api/capture', { method: 'POST', body: { kind: 'text', text: 'x', now: '2026-09-16T10:00' } });
+    const picked = first.data.items.filter((i) => /First class|Final week/.test(i.title)).map((i) => i.id);
+
+    // Choose two for the calendar. The other two must still be here afterwards.
+    const done = await api(`/api/batches/${first.data.batch.id}/commit`, { method: 'POST', body: { itemIds: picked } });
+    check('you can send only the ones you chose', done.data.committed === 2, String(done.data.committed));
+
+    const onCal = (await api('/api/agenda')).data.items.filter((i) => /Springfield|First class|Spring break|Final week|Commencement/.test(i.title));
+    check('only those two reach the calendar', onCal.length === 2, onCal.map((i) => i.title).join(', '));
+
+    const kept = (await api('/api/agenda?include=kept')).data.items;
+    const heldBack = kept.filter((i) => i.status === 'pending' && /Spring break|Commencement/.test(i.title));
+    check('the ones you skipped are STILL kept in the app', heldBack.length === 2,
+      heldBack.map((i) => i.title).join(', '));
+    check('and are marked as not on the calendar', heldBack.every((i) => i.status === 'pending'));
+
+    // Read the same document again, without saying it is an update.
+    reads({ document_title: 'Springfield High — Spring 2027 (rev)', items: [
+      ev('First class', '2027-01-11'), ev('Spring break', '2027-03-22'),
+      ev('Final week', '2027-05-03'), ev('Commencement', '2027-06-11')] });
+    const again = await api('/api/capture', { method: 'POST', body: { kind: 'text', text: 'x', now: '2026-09-16T10:00' } });
+    const sp = again.data.suggestedParent;
+    check('KevCal notices it has read this before', !!sp, 'no match offered');
+    check('it names the import and when it was read', sp && sp.title.includes('Springfield') && !!sp.read_at);
+    check('and it only offers, never merges by itself',
+      again.data.batch.parent_id === null, String(again.data.batch.parent_id));
+
+    const linked = await api(`/api/batches/${again.data.batch.id}/link-parent`, {
+      method: 'POST', body: { parentId: first.data.batch.id },
+    });
+    check('accepting the offer turns it into a revision', linked.status === 200, linked.text.slice(0, 100));
+    check('and a comparison comes back instead of a second calendar',
+      linked.data.diff && linked.data.diff.summary.changed === 1,
+      JSON.stringify(linked.data.diff?.summary));
+    check('a loop of versions is refused',
+      (await api(`/api/batches/${first.data.batch.id}/link-parent`, { method: 'POST', body: { parentId: again.data.batch.id } })).status === 400);
+
+    const named = await api(`/api/batches/${first.data.batch.id}`, { method: 'PATCH', body: { title: 'Kids school — spring term' } });
+    check('an import can be renamed to say where it came from',
+      named.data.batch.title === 'Kids school — spring term');
+    check('an empty name is refused',
+      (await api(`/api/batches/${first.data.batch.id}`, { method: 'PATCH', body: { title: '  ' } })).status === 400);
+
+    await api(`/api/batches/${first.data.batch.id}?lineage=1`, { method: 'DELETE' });
+  }
+
   console.log('\na dense academic calendar');
   {
     const ev = (t, d, e) => ({

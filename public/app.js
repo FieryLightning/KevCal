@@ -132,8 +132,9 @@ $$('.tab').forEach((t) => t.addEventListener('click', () => { haptic(); go(t.dat
 
 async function loadDates() {
   const list = $('#datesList');
-  const { items = [] } = await api('/api/agenda');
+  const { items = [] } = await api('/api/agenda?include=kept');
   const live = items.filter((i) => i.status === 'accepted');
+  const held = items.filter((i) => i.status === 'pending' && i.start_date);
 
   const upcoming = live.filter((i) => i.start_date && daysFromToday(i.start_date) >= 0);
   const past = live.filter((i) => i.start_date && daysFromToday(i.start_date) < 0);
@@ -148,7 +149,7 @@ async function loadDates() {
        flagged.length ? `${flagged.length} worth a check` : null].filter(Boolean).join(' · ')
     : 'Tap the camera and point it at something with a date on it.';
 
-  if (!live.length) {
+  if (!live.length && !held.length) {
     list.innerHTML = `<div class="empty"><b>No dates yet</b>
       A school letter, a poster, a timetable, an appointment card — anything.
       <div style="margin-top:14px"><a class="btn" href="/help.html">How to use KevCal</a></div></div>`;
@@ -164,15 +165,30 @@ async function loadDates() {
     if (later.length) groups.push(['Later', later]);
   }
   if (past.length) groups.push(['Gone by', past.slice(-12).reverse()]);
+  // Kept, but deliberately not sent to a calendar. Visible, because a copy you
+  // cannot see is not a copy.
+  if (held.length) groups.push(['Kept here only — not on your calendar', held]);
 
   list.innerHTML = groups.map(([label, rows]) => `
     <div class="section-label">${label}</div>
     ${rows.map((i, n) => itemCard(i, { delay: n, past: label === 'Gone by' })).join('')}
+    ${label.startsWith('Kept here only')
+      ? `<button class="btn" id="addHeld" type="button">Put these ${rows.length} on the calendar</button>`
+      : ''}
   `).join('');
-  wireItemCards(list, live);
+  wireItemCards(list, items);
+
+  const addHeld = $('#addHeld');
+  if (addHeld) addHeld.addEventListener('click', async () => {
+    const res = await api('/api/items/bulk', { method: 'POST', body: { op: 'accept', ids: held.map((i) => i.id) } });
+    if (res.error) return toast(res.error);
+    haptic(20);
+    toast(`${res.affected} added`);
+    loadDates();
+  });
 }
 
-function itemCard(item, { delay = 0, past = false, showFlags = false } = {}) {
+function itemCard(item, { delay = 0, past = false, showFlags = false, selectable = false } = {}) {
   const flags = item.flags || [];
   const worst = flags.some((f) => f.level === 'blocker') ? 'stop' : (flags.length ? 'warn' : '');
   const meta = [
@@ -195,10 +211,15 @@ function itemCard(item, { delay = 0, past = false, showFlags = false } = {}) {
     runway = `<div class="runway"><i style="width:${Math.round(item.runway * 100)}%"></i></div>`;
   }
 
+  const tick = selectable
+    ? `<div class="tick ${state.chosen?.has(item.id) ? 'on' : ''}" data-sel="${item.id}"
+         role="checkbox" aria-checked="${state.chosen?.has(item.id)}" tabindex="0"
+         title="Put this one on the calendar">${state.chosen?.has(item.id) ? '✓' : ''}</div>`
+    : '';
   return `
   <div class="item ${worst} ${past ? 'gone' : ''}" role="button" tabindex="0"
        data-id="${item.id}" style="animation-delay:${Math.min(delay * 45, 400)}ms">
-    ${dayChip(item)}
+    ${tick}${dayChip(item)}
     <div class="item-main">
       <div class="item-title">${esc(item.title)}</div>
       <div class="item-meta">${meta.map((m) => `<span>${m}</span>`).join('')}</div>
@@ -255,6 +276,20 @@ function wireItemCards(root, pool) {
       if (res.error) return toast(res.error);
       await refreshCurrent();
     });
+  });
+
+  $$('[data-sel]', root).forEach((el) => {
+    const flip = (e) => {
+      e.stopPropagation();
+      const id = el.dataset.sel;
+      if (state.chosen.has(id)) { state.chosen.delete(id); el.classList.remove('on'); el.textContent = ''; }
+      else { state.chosen.add(id); el.classList.add('on'); el.textContent = '✓'; }
+      el.setAttribute('aria-checked', state.chosen.has(id));
+      haptic();
+      updateAddButton();
+    };
+    el.addEventListener('click', flip);
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); flip(e); } });
   });
 
   $$('.opt[data-pick]', root).forEach((btn) => {
@@ -592,6 +627,17 @@ function renderReview({ silent = false } = {}) {
   } else if (blockers.length) {
     banner = `<div class="banner stop"><b>Nothing here is guessed.</b> Where I couldn't be certain, I've asked instead — answer the ${blockers.length === 1 ? 'one below' : `${blockers.length} below`} and you're done.</div>`;
   }
+  if (src.suggestedParent) {
+    const p = src.suggestedParent;
+    const when = new Date(p.read_at).toLocaleDateString();
+    banner += `<div class="banner warn" id="sameDoc">
+      <b>You have read this before.</b> It shares ${p.shared} dates with
+      “${esc(p.title)}”, read on ${esc(when)}. Comparing keeps one calendar instead of two.
+      <div class="opts">
+        <button class="opt pick" id="compareInstead" type="button">Compare with it</button>
+        <button class="opt" id="keepSeparate" type="button">No, keep separate</button>
+      </div></div>`;
+  }
   if (src.readerError) {
     banner += `<div class="banner warn">The reader couldn't handle this one (${esc(String(src.readerError).slice(0, 60))}), so this is the on-device reader's best effort.</div>`;
   }
@@ -616,10 +662,28 @@ function renderReview({ silent = false } = {}) {
                    ...checks.filter((i) => !blockers.includes(i)),
                    ...items.filter((i) => !blockers.includes(i) && !checks.includes(i))];
 
+  if (!state.chosen || !silent) state.chosen = new Set(items.map((i) => i.id));
   $('#reviewList').innerHTML = ordered.length
-    ? ordered.map((i, n) => itemCard(i, { delay: n, showFlags: true })).join('')
+    ? ordered.map((i, n) => itemCard(i, { delay: n, showFlags: true, selectable: true })).join('')
     : '';
   wireItemCards($('#reviewList'), items);
+
+  const compare = $('#compareInstead');
+  if (compare) compare.addEventListener('click', async () => {
+    haptic(12);
+    const res = await api(`/api/batches/${state.batch.id}/link-parent`, {
+      method: 'POST', body: { parentId: src.suggestedParent.id },
+    });
+    if (res.error) return toast(res.error);
+    state.lastResponse = res;
+    state.items = res.items;
+    renderDiff(res);
+  });
+  const keepSep = $('#keepSeparate');
+  if (keepSep) keepSep.addEventListener('click', () => {
+    state.lastResponse = { ...src, suggestedParent: null };
+    renderReview({ silent: true });
+  });
 
   const allEvents = $('#allEvents');
   if (allEvents) allEvents.addEventListener('click', async () => {
@@ -631,12 +695,24 @@ function renderReview({ silent = false } = {}) {
     reloadReview();
   });
 
-  const addable = items.filter((i) => i.status !== 'rejected');
+  updateAddButton();
+}
+
+/**
+ * Untick anything you do not want on the calendar. It is still kept here — the
+ * choice is about what leaves KevCal, never about what KevCal remembers.
+ */
+function updateAddButton() {
+  const blockers = state.items.filter((i) => i.blocked && !i.reviewed);
+  const n = state.chosen ? state.chosen.size : state.items.length;
   const btn = $('#btnAdd');
-  btn.disabled = !addable.length || blockers.length > 0;
-  btn.textContent = blockers.length
-    ? `${blockers.length} still to answer`
-    : addable.length ? `Add ${addable.length} to calendar` : 'Nothing to add';
+  btn.disabled = blockers.length > 0 || n === 0;
+  btn.textContent = blockers.length ? `${blockers.length} still to answer`
+    : n === 0 ? 'Keep all of them here only'
+    : `Add ${n} to calendar`;
+  const skipped = state.items.length - n;
+  const note = $('#skipNote');
+  if (note) note.textContent = skipped ? `${skipped} stay in KevCal without going on the calendar.` : '';
 }
 
 function countUp(el, to) {
@@ -663,7 +739,10 @@ $('#btnDiscard').addEventListener('click', async () => {
 
 $('#btnAdd').addEventListener('click', async () => {
   if (!state.batch) return;
-  const res = await api(`/api/batches/${state.batch.id}/commit`, { method: 'POST', body: {} });
+  const res = await api(`/api/batches/${state.batch.id}/commit`, {
+    method: 'POST',
+    body: { itemIds: state.chosen ? [...state.chosen] : undefined },
+  });
   if (res.error === 'needs_review') { toast(res.message); return reloadReview(); }
   if (res.error) return toast(res.error);
   haptic(30);
@@ -829,7 +908,7 @@ async function loadImports() {
     return `<div class="card">
       <h3>${esc(root.title)}</h3>
       <div class="item-meta" style="margin-bottom:10px">
-        <span>${when.toLocaleDateString()} ${when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
+        <span>read ${when.toLocaleDateString()}</span>
         <span>${kept} of ${total} kept</span>
         ${revisions ? `<span class="kindtag">updated ${revisions}×</span>` : ''}
         ${undone ? '<span class="kindtag">UNDONE</span>' : ''}
@@ -841,6 +920,7 @@ async function loadImports() {
           ? `<button class="btn" data-redo="${root.id}" type="button">Restore</button>`
           : `<button class="btn" data-undo="${root.id}" type="button">Undo</button>`}
         <button class="btn" data-share="${root.id}" type="button">Share</button>
+        <button class="btn" data-rename="${root.id}" type="button">Rename</button>
         <button class="btn ghost" data-del="${root.id}" type="button">Delete</button>
       </div>
     </div>`;
@@ -851,6 +931,15 @@ async function loadImports() {
     if (res.error) return toast(res.error);
     state.lastResponse = {};
     showReview(res);
+  });
+  $$('[data-rename]', list).forEach((b) => b.onclick = async () => {
+    const current = groups.get(b.dataset.rename)?.root.title || '';
+    const name = prompt('What should this be called? (e.g. the school it came from)', current);
+    if (name === null) return;
+    const res = await api(`/api/batches/${b.dataset.rename}`, { method: 'PATCH', body: { title: name.trim() } });
+    if (res.error) return toast(res.error);
+    toast('Renamed');
+    loadImports();
   });
   $$('[data-update]', list).forEach((b) => b.onclick = () => {
     state.updatingBatch = b.dataset.update;
