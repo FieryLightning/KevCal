@@ -150,7 +150,8 @@ async function loadDates() {
 
   if (!live.length) {
     list.innerHTML = `<div class="empty"><b>No dates yet</b>
-      A school letter, a poster, a timetable, an appointment card — anything.</div>`;
+      A school letter, a poster, a timetable, an appointment card — anything.
+      <div style="margin-top:14px"><a class="btn" href="/help.html">How to use KevCal</a></div></div>`;
     return;
   }
 

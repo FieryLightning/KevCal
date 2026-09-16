@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>How to use KevCal</title>
+<meta name="theme-color" content="#fcfbf8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121317" media="(prefers-color-scheme: dark)">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="icon" href="/icon-192.png">
+<link rel="stylesheet" href="/styles.css">
+<style>
+  /* A leaflet, not an app screen: one column, generous measure, printable. */
+  body { padding-bottom: 40px; }
+  .sheet-page { max-width: 640px; margin: 0 auto; padding: 0 18px; }
+
+  .masthead {
+    padding: calc(env(safe-area-inset-top) + 26px) 0 20px;
+    border-bottom: 3px double var(--line-2);
+    margin-bottom: 26px;
+  }
+  .masthead .kicker {
+    font-size: 10px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--brand); margin-bottom: 8px;
+  }
+  .masthead h1 { font-size: 34px; margin-bottom: 8px; }
+  .masthead p { color: var(--muted); font-size: 15px; max-width: 46ch; }
+
+  section { margin-bottom: 30px; }
+  section > h2 {
+    display: flex; align-items: baseline; gap: 10px;
+    padding-bottom: 7px; border-bottom: 1px solid var(--line); margin-bottom: 14px;
+  }
+  section > h2 .n {
+    font-family: var(--display); font-size: 14px; color: var(--brand);
+    font-variant-numeric: tabular-nums; flex: 0 0 auto;
+  }
+  p, li { font-size: 15px; line-height: 1.6; color: var(--ink-2); }
+  p + p { margin-top: 10px; }
+  ol.steps-lg, ul.plain { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 10px; }
+  /* Block, not flex: as a flex container every inline <b> and <i> inside the
+     item became its own flex child and the sentence broke into columns. */
+  ul.plain { list-style: none; padding-left: 0; }
+  ul.plain li { display: block; position: relative; padding-left: 22px; }
+  ul.plain li::before { content: '—'; color: var(--brand); position: absolute; left: 0; top: 0; }
+  b, strong { color: var(--ink); }
+
+  .lede { font-size: 16px; color: var(--ink); }
+
+  .demo { display: flex; gap: 13px; align-items: flex-start; margin: 14px 0; }
+  .demo .body { flex: 1; min-width: 0; }
+
+  .note {
+    border-left: 3px solid var(--brand); background: var(--brand-soft);
+    padding: 12px 14px; border-radius: 0 var(--r-sm) var(--r-sm) 0; font-size: 14px;
+  }
+  .note b { display: block; margin-bottom: 3px; }
+
+  table.tr { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.tr th {
+    text-align: left; font-size: 10px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--muted); padding: 0 0 7px; border-bottom: 1px solid var(--line);
+  }
+  table.tr td { padding: 11px 0; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--ink-2); }
+  table.tr td:first-child { padding-right: 14px; font-weight: 650; color: var(--ink); width: 42%; }
+
+  .backbar {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; gap: 10px;
+    padding: calc(env(safe-area-inset-top) + 9px) 18px 9px;
+    background: color-mix(in srgb, var(--bg) 86%, transparent);
+    backdrop-filter: saturate(1.6) blur(14px);
+    -webkit-backdrop-filter: saturate(1.6) blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  .backbar a { color: var(--brand); text-decoration: none; font-weight: 650; font-size: 14px; }
+
+  .colophon {
+    margin-top: 34px; padding-top: 16px; border-top: 3px double var(--line-2);
+    font-size: 13px; color: var(--muted);
+  }
+
+  @media print {
+    .backbar { display: none; }
+    body { background: #fff; color: #000; }
+    section { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<nav class="backbar"><a href="/">← Back to KevCal</a></nav>
+
+<div class="sheet-page">
+
+  <header class="masthead">
+    <div class="kicker">How to use it</div>
+    <h1>KevCal</h1>
+    <p>Point your phone at anything with a date on it — a school letter, a poster,
+       an appointment card — and it becomes a calendar entry you check before you keep it.</p>
+  </header>
+
+  <section>
+    <h2><span class="n">1</span> Put it on your phone</h2>
+    <ol class="steps-lg">
+      <li>Open KevCal in <b>Safari</b> on your phone, using the address the app printed when it started.</li>
+      <li>Tap the <b>Share</b> button, then <b>Add to Home Screen</b>.</li>
+      <li>Open it from the icon. It runs full screen, like any other app.</li>
+    </ol>
+    <div class="note" style="margin-top:14px">
+      <b>The laptop has to be awake.</b>
+      KevCal lives on the computer, not the phone — the phone is just looking at it.
+      If the laptop is asleep or on a different network, the page will not load.
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span> Capture something</h2>
+    <p>Tap the <b>camera button</b> in the middle of the bar at the bottom. You get four ways in:</p>
+    <ul class="plain" style="margin-top:12px">
+      <li><b>Take a photo</b> — a letter in your hand, a poster on a wall, a noticeboard.</li>
+      <li><b>From your photos</b> — a screenshot you already took.</li>
+      <li><b>A file or PDF</b> — a newsletter or a term calendar.</li>
+      <li><b>Paste some text</b> — an email or a message.</li>
+    </ul>
+    <p style="margin-top:12px">Straight-on beats artistic. It reads fine print, so don't crop it out.</p>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span> Read what came back</h2>
+    <p class="lede">Nothing is ever guessed. Where KevCal could not be certain, it asks instead of inventing an answer.</p>
+
+    <div class="demo" style="margin-top:16px">
+      <div class="daychip due"><div class="m">Sep</div><div class="d">28</div><div class="w">Mon</div></div>
+      <div class="body">
+        <p><b>The date stamp</b> is the day. <b>Red means a deadline</b> — something to act
+           <i>before</i>, like a payment or a form. Blue is an event, something to turn up to.</p>
+      </div>
+    </div>
+
+    <div class="flag stop" style="margin-top:14px">
+      <b>Needs your answer</b>
+      Something could not be worked out — a letter that says “after half term” without saying when that is.
+      These are <strong>red, and they block</strong>: you cannot add the batch until you answer.
+    </div>
+
+    <div class="flag" style="margin-top:10px">
+      <b>Worth a check</b>
+      A choice was made and is being declared — a year nobody printed, or “3.30” with no am or pm.
+      These are <strong>amber, and they do not block</strong>. The alternative is one tap away.
+    </div>
+
+    <p style="margin-top:14px">Anything with no flag was read cleanly. Quiet means confident.</p>
+  </section>
+
+  <section>
+    <h2><span class="n">4</span> Fix anything that is wrong</h2>
+    <ul class="plain">
+      <li><b>One tap</b> — where a flag offers buttons (<i>3:30pm</i> / <i>No, 3:30am</i>), tapping one settles it.</li>
+      <li><b>Tap the entry itself</b> to open it and edit the title, date, time, place or notes.</li>
+      <li><b>Check where it came from</b> — the editor shows the exact patch of the page it was read from. Tap that to see the whole document with the spot boxed.</li>
+      <li><b>Remove</b> takes a single entry out; <b>Discard</b> throws away the whole import.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="n">5</span> Into your real calendar</h2>
+    <p>Press <b>Add to calendar</b>. Then <b>Add to Calendar</b> on the next screen hands your phone a
+       calendar file — it will offer to put the entries into Apple Calendar, which for most people is
+       already syncing to Google.</p>
+    <p>Reminders are written <i>inside</i> each entry, so they go off whether or not KevCal is running.
+       Deadlines get several, counting down; events get one the day before.</p>
+  </section>
+
+  <section>
+    <h2><span class="n">6</span> Undo, always</h2>
+    <p>Every capture is one <b>import</b>. Go to <b>Imports</b> and <b>Undo</b> takes the whole thing back
+       out in one tap; <b>Restore</b> puts it back. Nothing you do here is permanent except <b>Delete</b>,
+       which also deletes the original photo.</p>
+    <p>Import an updated letter and KevCal compares it with the old one — <i>“1 changed, 1 added”</i> —
+       instead of giving you two of everything. Anything you edited by hand is left alone.</p>
+  </section>
+
+  <section>
+    <h2><span class="n">7</span> Sending dates to someone else</h2>
+    <p>From any import, <b>Share</b>. Whoever you send it to installs nothing and signs up for nothing:
+       plain text to paste into a message, a calendar file, or a link they can subscribe to. You can
+       stop a shared link working at any time from the <b>Shared</b> tab.</p>
+  </section>
+
+  <section>
+    <h2><span class="n">8</span> When something looks wrong</h2>
+    <table class="tr">
+      <tr><th>What you see</th><th>What to do</th></tr>
+      <tr>
+        <td>It found nothing</td>
+        <td>Usually a photo too dark, too angled, or cropped. Retake it straight on. For a screenshot of text, paste the text instead — that always works.</td>
+      </tr>
+      <tr>
+        <td>A date is plainly wrong</td>
+        <td>Tap it and correct it. Then tap the source crop — if the page really does say that, the document is wrong, not KevCal.</td>
+      </tr>
+      <tr>
+        <td>“That’s already gone”</td>
+        <td>The date is in the past. Often the year was not printed and the wrong one was assumed — the flag offers the other year.</td>
+      </tr>
+      <tr>
+        <td>“Reading is paused”</td>
+        <td>The month’s spending cap is reached. Imports still work, read on the laptop instead, just less well.</td>
+      </tr>
+      <tr>
+        <td>The page will not load on your phone</td>
+        <td>The laptop is asleep, or you are on a different network from it.</td>
+      </tr>
+    </table>
+  </section>
+
+  <section>
+    <h2><span class="n">9</span> What it will never do</h2>
+    <ul class="plain">
+      <li><b>Invent a repeat.</b> “Every other Tuesday” is offered as a button you press, never applied for you — and a repeat always needs an end date.</li>
+      <li><b>Round an impossible date.</b> “29 February 2027” is reported as unreadable, not quietly moved to the 28th.</li>
+      <li><b>Hide what it assumed.</b> If it had to choose, it says so on the card, in words.</li>
+    </ul>
+  </section>
+
+  <div class="colophon">
+    <p><b>Where your things go.</b> Everything lives on the computer running KevCal — a database and the
+       original images. No account, nothing synced anywhere. The one exception: the page you import is
+       uploaded to whichever reader is switched on, so it can be read. The line at the bottom of every
+       screen always names it.</p>
+  </div>
+
+</div>
+</body>
+</html>

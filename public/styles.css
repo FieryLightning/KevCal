@@ -585,3 +585,11 @@ input[type=date], input[type=time] { min-height: 44px; }
 /* Empty states lean on type and a ruled edge rather than a decorative glyph. */
 .empty b { font-family: var(--display); font-weight: 600; font-size: 19px; }
 .empty { border-style: dashed; border-width: 1px; }
+
+/* The guide sits in the card rack but is a link, so it has to look pressable. */
+.guide-link { display: block; text-decoration: none; color: inherit; transition: transform .16s var(--spring), border-color .2s; }
+.guide-link:active { transform: scale(.99); }
+.guide-link h3::after { content: '→'; color: var(--brand); margin-left: auto; }
+.guide-link h3 { display: flex; align-items: center; gap: 8px; }
+a.btn { text-decoration: none; display: inline-block; }
+a.icon-btn { text-decoration: none; font-weight: 700; color: var(--brand); }
