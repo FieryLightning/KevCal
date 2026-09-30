@@ -619,3 +619,23 @@ a.icon-btn { text-decoration: none; font-weight: 700; color: var(--brand); }
 }
 .item .tick.on { background: var(--brand); border-color: var(--brand); }
 .skip-note { font-size: 12px; color: var(--muted); flex: 1; line-height: 1.35; }
+
+/* swipe to delete ------------------------------------------------------ */
+
+/* The card slides over a red pad. pan-y leaves vertical scrolling to the
+   browser and hands horizontal drags to us. */
+.swipe { position: relative; border-radius: var(--r); transition: height .24s var(--ease), opacity .2s, margin .24s var(--ease); }
+.swipe .item { touch-action: pan-y; transition: transform .28s var(--spring), border-color .2s; }
+.swipe .item.dragging { transition: none; }
+.swipe-bg {
+  position: absolute; inset: 0; border-radius: var(--r);
+  display: flex; align-items: center; justify-content: flex-end; padding-right: 22px;
+  background: var(--stop-bg); color: var(--stop); font-weight: 750; font-size: 15px;
+  opacity: 0; transition: background .15s, color .15s;
+}
+.swipe.open .swipe-bg { opacity: 1; }
+.swipe.armed .swipe-bg { background: var(--stop); color: #fff; }
+.swipe.going { height: 0 !important; opacity: 0; overflow: hidden; }
+.still .item { animation: none; }
+
+.btn.danger { background: var(--stop-bg); color: var(--stop); border-color: var(--stop-line); }

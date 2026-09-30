@@ -150,8 +150,23 @@ sudo systemctl restart kevcal
 
 Schema changes are additive and run themselves at startup.
 
-**Rotating the token.** Change it in `.env`, restart, and visit `/?k=` once with
-the new value on each device. Old cookies stop working immediately.
+**The token is the group's passcode.** Anyone opening the site without it gets
+a passcode box and a note that this is a small group's private tool. Typing it
+once remembers the device for a year. Everyone who gets in shares one list of
+dates, and every page they import is read on your API key and counts against
+your `KEVCAL_MONTHLY_BUDGET`. Wrong guesses are limited to 8 per 15 minutes per
+address, which slows guessing but cannot stop it, so use four random words
+rather than a PIN.
+
+**US only.** Set `KEVCAL_ALLOW_COUNTRIES=US` and `KEVCAL_TRUST_PROXY=1` to turn
+away visitors from anywhere else. The country comes from Cloudflare's
+`CF-IPCountry` header, so this works behind the Cloudflare tunnel, not behind
+Caddy on its own. With the setting on and no Cloudflare in front, only your own
+wifi gets in. A VPN gets past it. It cuts out bot noise, but it doesn't
+replace the passcode.
+
+**Rotating the token.** Change it in `.env` and restart. Old cookies stop working
+immediately; everyone types the new passcode once.
 
 ---
 
@@ -159,7 +174,8 @@ the new value on each device. Old cookies stop working immediately.
 
 - [ ] `npm run doctor` is all clear
 - [ ] `KEVCAL_TOKEN` is long, and the link works from a device that has never seen it
-- [ ] Opening the site **without** `?k=` gives the lock screen, not your dates
+- [ ] Opening the site **without** `?k=` gives the passcode box, not your dates
+- [ ] If you set `KEVCAL_ALLOW_COUNTRIES`, you're behind Cloudflare with `KEVCAL_TRUST_PROXY=1`
 - [ ] `KEVCAL_MONTHLY_BUDGET` is set, and a cap exists at the provider too
 - [ ] Gemini billing is attached, or you have accepted that the free tier trains
       on what you send (see README)

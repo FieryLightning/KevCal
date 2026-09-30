@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=5">
 <title>KevCal</title>
-<meta name="description" content="Point your phone at anything with a date on it.">
+<meta name="description" content="School and work dates, from the page to your calendar.">
 <meta name="theme-color" content="#fcfbf8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#121317" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -167,11 +167,12 @@
   <div class="sheet">
     <div class="grabber"></div>
     <h2>What are you looking at?</h2>
+    <p class="muted small scope-note">School and work dates only — term calendars, school events, career fairs, work deadlines.</p>
     <div class="choices">
       <button class="choice" id="pickCamera" type="button"><span class="ico">📸</span><b>Take a photo</b><i>A letter, a poster, a noticeboard</i></button>
       <button class="choice" id="pickLibrary" type="button"><span class="ico">🖼️</span><b>From your photos</b><i>A screenshot you already took</i></button>
       <button class="choice" id="pickFile" type="button"><span class="ico">📄</span><b>A file or PDF</b><i>A newsletter, a term calendar</i></button>
-      <button class="choice" id="pickText" type="button"><span class="ico">✍️</span><b>Paste some text</b><i>An email or a message</i></button>
+      <button class="choice" id="pickText" type="button"><span class="ico">📋</span><b>Paste</b><i>A screenshot you copied, an email, a message</i></button>
     </div>
   </div>
 </div>
@@ -185,8 +186,8 @@
   <div class="scrim" data-close></div>
   <div class="sheet">
     <div class="grabber"></div>
-    <h2>Paste the text</h2>
-    <textarea id="pasteBox" rows="7" placeholder="Paste an email, a message, anything with dates in it…"></textarea>
+    <h2>Paste it here</h2>
+    <textarea id="pasteBox" rows="7" placeholder="Paste a screenshot, an email, a message — anything with dates in it…"></textarea>
     <button class="btn primary big" id="btnReadText" type="button">Find the dates</button>
   </div>
 </div>
@@ -255,7 +256,7 @@
     <label class="field"><span>Where</span><input id="edWhere" placeholder="Optional"></label>
     <label class="field"><span>Notes</span><textarea id="edNotes" rows="2" placeholder="Optional"></textarea></label>
     <div class="row sticky-actions">
-      <button class="btn ghost" id="edDelete" type="button">Remove</button>
+      <button class="btn danger" id="edDelete" type="button">Delete</button>
       <button class="btn primary grow" id="edSave" type="button">Save</button>
     </div>
   </div>

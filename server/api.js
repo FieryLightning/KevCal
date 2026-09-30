@@ -127,6 +127,8 @@ export async function quickCapture(req, res) {
   });
 }
 
+const ONLY_SCHOOL_WORK = !['0', 'false', 'no'].includes(String(process.env.KEVCAL_ONLY_SCHOOL_WORK || '').toLowerCase());
+
 async function captureCore(body) {
   const fail = (status, error) => ({ status, payload: { error } });
 
@@ -165,6 +167,17 @@ async function captureCore(body) {
     });
   } catch (e) {
     return fail(500, `extraction failed: ${e.message}`);
+  }
+
+  // KevCal is for school and work dates, and it reads them on the owner's key.
+  // A document the reader places outside both is refused and its upload
+  // removed, rather than kept. Only a page the AI read carries this judgement;
+  // the on-device fallback costs nothing and cannot make it.
+  if (ONLY_SCHOOL_WORK && result.doc?.document_purpose === 'other') {
+    if (filePath) fs.rmSync(filePath, { force: true });
+    log('capture_refused', { detail: { purpose: 'other', kind: result.doc?.document_kind ?? null } });
+    return fail(422, 'KevCal is only for school and work dates — term calendars, school events, '
+      + 'career fairs, work deadlines. This one looks like something else, so it was not kept.');
   }
 
   const batchId = id('b_');

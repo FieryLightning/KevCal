@@ -61,6 +61,8 @@ const server = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], {
     KEVCAL_READER: '',
     KEVCAL_TOKEN: '',
     KEVCAL_TRUST_PROXY: '',
+    KEVCAL_ONLY_SCHOOL_WORK: '',
+    KEVCAL_ALLOW_COUNTRIES: '',
     KEVCAL_MODEL: '',
     GEMINI_MODEL: '',
     OPENAI_MODEL: '',
@@ -379,6 +381,35 @@ try {
     await api(`/api/batches/${first.data.batch.id}?lineage=1`, { method: 'DELETE' });
   }
 
+  console.log('\nschool and work only');
+  {
+    const ev = (t, d) => ({
+      title: t, kind: 'event', start_date: d, has_explicit_year: true,
+      am_pm_stated: true, confidence: 0.95, source_quote: t,
+    });
+    const before = (await api('/api/batches')).data.batches.length;
+    reads({ document_title: 'Birthday party', document_purpose: 'other', items: [ev('Party', '2026-10-10')] });
+    const party = await api('/api/capture', { method: 'POST', body: { kind: 'text', text: 'x', now: '2026-09-16T10:00' } });
+    check('a document that is neither school nor work is refused', party.status === 422, String(party.status));
+    check('and says what KevCal is for', /school and work/i.test(party.data.error || ''), party.data.error);
+    check('and nothing of it is kept', (await api('/api/batches')).data.batches.length === before);
+
+    const png = fs.readFileSync(path.join(ROOT, 'samples/poster.png')).toString('base64');
+    const origs = () => fs.readdirSync(path.join(TMP_DATA, 'originals')).length;
+    const n = origs();
+    const photo = await api('/api/capture', { method: 'POST', body: { kind: 'image', filename: 'p.png', data: png, now: '2026-09-16T10:00' } });
+    check('a refused photo is refused too', photo.status === 422, String(photo.status));
+    check('and its upload is deleted', origs() === n, `${n} -> ${origs()}`);
+
+    reads({ document_title: 'Career fair', document_purpose: 'work', items: [ev('Career fair', '2026-10-21')] });
+    const fair = await api('/api/capture', { method: 'POST', body: { kind: 'text', text: 'x', now: '2026-09-16T10:00' } });
+    check('a career fair gets in', fair.status === 200, String(fair.status));
+    reads({ document_title: 'Term dates', document_purpose: 'school', items: [ev('Term starts', '2026-10-05')] });
+    const term = await api('/api/capture', { method: 'POST', body: { kind: 'text', text: 'x', now: '2026-09-16T10:00' } });
+    check('so does a school calendar', term.status === 200, String(term.status));
+    for (const b of [fair, term]) await api(`/api/batches/${b.data.batch.id}`, { method: 'DELETE' });
+  }
+
   console.log('\na dense academic calendar');
   {
     const ev = (t, d, e) => ({
@@ -614,9 +645,56 @@ try {
     const shareToken = (await made.json()).token;
     const publicFeed = await fetch(LOCK + '/s/' + shareToken + '.ics');
     check('a shared list is reachable without the key', publicFeed.status === 200, String(publicFeed.status));
+
+    const form = { 'content-type': 'application/x-www-form-urlencoded', 'x-forwarded-for': '203.0.113.9' };
+    const noGood = await fetch(LOCK + '/unlock', { method: 'POST', headers: form, body: 'k=guess', redirect: 'manual' });
+    check('a wrong passcode in the box stays locked', noGood.status === 401, String(noGood.status));
+    check('and sets no cookie', !noGood.headers.get('set-cookie'));
+    const typed = await fetch(LOCK + '/unlock', { method: 'POST', headers: form, body: 'k=' + encodeURIComponent(TOKEN + ' '), redirect: 'manual' });
+    check('the right passcode in the box opens it', typed.status === 303, String(typed.status));
+    check('and remembers the device', /kc_token=/.test(typed.headers.get('set-cookie') || ''));
+    const grinder = { ...form, 'x-forwarded-for': '203.0.113.77' };
+    let last = 0;
+    for (let i = 0; i < 9; i++) last = (await fetch(LOCK + '/unlock', { method: 'POST', headers: grinder, body: 'k=g' + i })).status;
+    check('guessing is cut off after a handful of tries', last === 429, String(last));
   } finally {
     locked.kill();
     try { fs.rmSync(LOCK_DATA, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+
+  console.log('\nonly from the countries allowed');
+  {
+    const GEO_PORT = PORT + 2;
+    const GEO = 'http://127.0.0.1:' + GEO_PORT;
+    const GEO_DATA = fs.mkdtempSync(path.join(os.tmpdir(), 'kevcal-geo-'));
+    const geo = spawn(process.execPath, [path.join(ROOT, 'server/index.js')], {
+      env: {
+        ...process.env,
+        KEVCAL_PORT: String(GEO_PORT), KEVCAL_DATA: GEO_DATA, KEVCAL_HOST: '127.0.0.1',
+        KEVCAL_ALLOW_COUNTRIES: 'US', KEVCAL_TRUST_PROXY: '1', KEVCAL_TOKEN: '',
+        GEMINI_API_KEY: '', OPENAI_API_KEY: '', KEVCAL_FAKE_READER: '',
+        KEVCAL_MONTHLY_BUDGET: '', KEVCAL_READER: '',
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    try {
+      const upSince = Date.now();
+      while (Date.now() - upSince < 8000) {
+        try { const r = await fetch(GEO + '/api/health'); if (r.ok) break; } catch { /* retry */ }
+        await new Promise((r) => setTimeout(r, 120));
+      }
+      const via = (country) => ({ 'x-forwarded-for': '198.51.100.4', ...(country ? { 'cf-ipcountry': country } : {}) });
+      check('the same wifi, straight in, needs no country', (await fetch(GEO + '/api/health')).status === 200);
+      check('a US visitor through Cloudflare gets in', (await fetch(GEO + '/api/health', { headers: via('US') })).status === 200);
+      check('anyone else is turned away', (await fetch(GEO + '/api/health', { headers: via('CN') })).status === 403);
+      check('and so is a visitor with no country at all', (await fetch(GEO + '/api/health', { headers: via(null) })).status === 403);
+      check('a territory is not the fifty states', (await fetch(GEO + '/api/health', { headers: via('PR') })).status === 403);
+      check('calendar feeds are left for calendar servers to fetch',
+        (await fetch(GEO + '/s/no-such-token.ics', { headers: via('IE') })).status === 404);
+    } finally {
+      geo.kill();
+      try { fs.rmSync(GEO_DATA, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
   }
 
   console.log('\nsafety: an upload is what its bytes say, not what its name says');

@@ -51,6 +51,7 @@ export const DOC_PROPERTIES = {
   document_span: { type: ['string', 'null'], description: 'A year span the document names for itself, e.g. "2026-2027" from "Academic Calendar 2026-2027". null if absent.' },
   document_title: { type: ['string', 'null'], description: 'The headline of the document, for naming this import.' },
   document_kind: { type: ['string', 'null'], description: 'What sort of document this is, in two or three words ("school letter", "appointment card", "poster").' },
+  document_purpose: { type: 'string', enum: ['school', 'work', 'other'], description: 'Whose world the document belongs to. school: anything from or about a school, college or university — term calendars, letters home, trips, sports days, exams, clubs, parents\' evenings. work: jobs and careers — shifts, meetings, deadlines, training, career fairs, interviews, conferences. other: everything else — personal, medical, social, shopping, travel, entertainment. When it is genuinely both or unclear, choose school or work, not other.' },
 };
 
 export const SCHEMA = {
@@ -116,6 +117,8 @@ HARD RULES
 
 12. If the document names the academic or financial year it covers ("2026-27"), every date belongs inside that span. A March date in a 2026-27 calendar is March 2027, not March 2026.
 
+13. Set document_purpose honestly, whatever it is. You still report the items either way; the checking program decides what to do with them.
+
 BOXES
 
 box_2d locates source_quote on the page as [ymin, xmin, ymax, xmax], each normalised to 0-1000. Tight to the text. If you cannot place it, use null rather than a guess.
@@ -139,6 +142,7 @@ export function shapeResult(parsed, model) {
       document_span: parsed.document_span ?? null,
       document_title: parsed.document_title ?? null,
       document_kind: parsed.document_kind ?? null,
+      document_purpose: parsed.document_purpose ?? null,
     },
     items: Array.isArray(parsed.items) ? parsed.items : [],
   };

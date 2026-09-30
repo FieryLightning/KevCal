@@ -130,9 +130,10 @@ $$('.tab').forEach((t) => t.addEventListener('click', () => { haptic(); go(t.dat
 
 // ───────────────────────────────────────────────────────── dates view
 
-async function loadDates() {
+async function loadDates({ still = false } = {}) {
   const list = $('#datesList');
-  const { items = [] } = await api('/api/agenda?include=kept');
+  const { items: all = [] } = await api('/api/agenda?include=kept');
+  const items = all.filter((i) => !pendingDeletes.has(i.id));
   const live = items.filter((i) => i.status === 'accepted');
   const held = items.filter((i) => i.status === 'pending' && i.start_date);
 
@@ -151,7 +152,8 @@ async function loadDates() {
 
   if (!live.length && !held.length) {
     list.innerHTML = `<div class="empty"><b>No dates yet</b>
-      A school letter, a poster, a timetable, an appointment card — anything.
+      A school calendar, a letter home, a career fair flyer, a work schedule.
+      KevCal is for school and work dates only.
       <div style="margin-top:14px"><a class="btn" href="/help.html">How to use KevCal</a></div></div>`;
     return;
   }
@@ -176,7 +178,10 @@ async function loadDates() {
       ? `<button class="btn" id="addHeld" type="button">Put these ${rows.length} on the calendar</button>`
       : ''}
   `).join('');
+  // A redraw after a delete should not replay every card's entrance.
+  list.classList.toggle('still', still);
   wireItemCards(list, items);
+  wireSwipe(list);
 
   const addHeld = $('#addHeld');
   if (addHeld) addHeld.addEventListener('click', async () => {
@@ -257,6 +262,7 @@ function wireItemCards(root, pool) {
     if (!item) return;
     const open = (e) => {
       if (e.target.closest('.opt')) return;
+      if (Date.now() - (card.swipedAt || 0) < 500) return;  // the tap that ends a swipe
       haptic(); openEditor(item);
     };
     card.addEventListener('click', open);
@@ -320,6 +326,111 @@ function wireItemCards(root, pool) {
   });
 }
 
+// ───────────────────────────────────────────────────────── deleting
+
+// The server's delete is final, so the undo lives here: a date deleted from
+// the Dates list vanishes at once but only reaches the server once its Undo
+// has gone — or straight away if the page is closed first.
+const pendingDeletes = new Map();   // item id -> timer
+const UNDO_MS = 7000;
+
+function sendDeletes(ids, keepalive = false) {
+  return fetch('/api/items/bulk', {
+    method: 'POST', keepalive,
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ op: 'delete', ids }),
+  }).catch(() => toast('Could not delete that — try again'));
+}
+
+function deleteLater(id) {
+  haptic(20);
+  toast('Deleted', {
+    label: 'Undo',
+    run: () => {
+      clearTimeout(pendingDeletes.get(id));
+      pendingDeletes.delete(id);
+      haptic();
+      loadDates({ still: true });
+    },
+  });
+  // A beat longer than the toast, so Undo can never lose the race.
+  pendingDeletes.set(id, setTimeout(() => { pendingDeletes.delete(id); sendDeletes([id]); }, UNDO_MS + 300));
+  const wrap = $(`#datesList .item[data-id="${id}"]`)?.closest('.swipe');
+  if (!wrap) return loadDates({ still: true });
+  wrap.style.height = wrap.offsetHeight + 'px';
+  requestAnimationFrame(() => wrap.classList.add('going'));
+  setTimeout(() => loadDates({ still: true }), 260);
+}
+
+function flushDeletes() {
+  if (!pendingDeletes.size) return;
+  pendingDeletes.forEach(clearTimeout);
+  sendDeletes([...pendingDeletes.keys()], true);
+  pendingDeletes.clear();
+  $('#toast').hidden = true;   // its Undo has nothing left to take back
+}
+// A phone can close a backgrounded app without another word, so leaving the
+// app — not closing it — is the last safe moment to send what was deleted.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushDeletes();
+});
+window.addEventListener('pagehide', flushDeletes);
+
+/**
+ * Swipe a date to the left to delete it — the gesture every phone list uses.
+ * Past a third of the card it arms (the red turns solid); let go there and it
+ * is gone, with Undo. Anything short of that springs back. Touch and pen only:
+ * with a mouse, the editor's Delete is right there.
+ */
+function wireSwipe(root) {
+  $$('.item', root).forEach((card) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'swipe';
+    wrap.innerHTML = '<div class="swipe-bg" aria-hidden="true"><span>Delete</span></div>';
+    card.before(wrap);
+    wrap.append(card);
+
+    let pid = null, x0 = 0, y0 = 0, dragging = false;
+    card.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' || e.target.closest('.opt, .tick')) return;
+      pid = e.pointerId; x0 = e.clientX; y0 = e.clientY; dragging = false;
+    });
+    card.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== pid) return;
+      const dx = e.clientX - x0, dy = e.clientY - y0;
+      if (!dragging) {
+        if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) { pid = null; return; }  // a scroll
+        if (dx > -12 || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+        dragging = true;
+        card.setPointerCapture(pid);
+        card.classList.add('dragging');
+        wrap.classList.add('open');
+      }
+      const d = Math.min(0, dx);
+      card.style.transform = `translateX(${d}px)`;
+      const armed = -d > card.offsetWidth * 0.33;
+      if (armed !== wrap.classList.contains('armed')) { wrap.classList.toggle('armed', armed); haptic(armed ? 12 : 4); }
+    });
+    const end = (e) => {
+      if (e.pointerId !== pid) return;
+      pid = null;
+      if (!dragging) return;
+      card.swipedAt = Date.now();
+      card.classList.remove('dragging');
+      if (wrap.classList.contains('armed') && e.type === 'pointerup') {
+        card.style.transform = 'translateX(-110%)';
+        deleteLater(card.dataset.id);
+      } else {
+        card.style.transform = '';
+        wrap.classList.remove('armed');
+        setTimeout(() => { if (!card.classList.contains('dragging')) wrap.classList.remove('open'); }, 300);
+      }
+    };
+    card.addEventListener('pointerup', end);
+    card.addEventListener('pointercancel', end);
+  });
+}
+
 async function refreshCurrent() {
   if (!$('#review').hidden && state.batch) return reloadReview();
   if (state.view === 'dates') return loadDates();
@@ -331,7 +442,34 @@ $('#btnCapture').addEventListener('click', () => { haptic(); openOverlay($('#cho
 $('#pickCamera').addEventListener('click', () => { closeOverlay($('#chooser')); $('#fileCamera').click(); });
 $('#pickLibrary').addEventListener('click', () => { closeOverlay($('#chooser')); $('#fileLibrary').click(); });
 $('#pickFile').addEventListener('click', () => { closeOverlay($('#chooser')); $('#filePicker').click(); });
-$('#pickText').addEventListener('click', () => { closeOverlay($('#chooser')); openOverlay($('#textSheet')); $('#pasteBox').focus(); });
+// A phone has no Cmd-V, so "Paste" reads the clipboard itself: a copied
+// screenshot goes straight to the scanner, text lands in the box to check.
+// Where the browser won't hand the clipboard over, the box is still there to
+// long-press and paste into — and an image pasted there is caught too.
+$('#pickText').addEventListener('click', async () => {
+  closeOverlay($('#chooser'));
+  const fallback = (text) => {
+    openOverlay($('#textSheet'));
+    if (text) $('#pasteBox').value = text;
+    $('#pasteBox').focus();
+  };
+  if (!navigator.clipboard?.read) return fallback();
+  try {
+    // One read, then everything from what it returned: a second clipboard call
+    // comes after the tap that allowed the first, and iPhone refuses it.
+    const entries = await navigator.clipboard.read();
+    for (const entry of entries) {
+      const type = entry.types.find((t) => t.startsWith('image/') || t === 'application/pdf');
+      if (type) {
+        const blob = await entry.getType(type);
+        const ext = type === 'application/pdf' ? 'pdf' : type.split('/')[1];
+        return captureFile(new File([blob], `pasted.${ext}`, { type }));
+      }
+    }
+    const plain = entries.find((e) => e.types.includes('text/plain'));
+    fallback(plain ? (await (await plain.getType('text/plain')).text()).trim() : '');
+  } catch { fallback(); }
+});
 
 ['fileCamera', 'fileLibrary', 'filePicker'].forEach((id) => {
   $(`#${id}`).addEventListener('change', (e) => {
@@ -352,8 +490,14 @@ $('#btnReadText').addEventListener('click', () => {
 // Paste a screenshot straight in, from anywhere in the app.
 window.addEventListener('paste', (e) => {
   if (!$('#review').hidden || !$('#editor').hidden) return;
-  const file = [...(e.clipboardData?.files || [])][0];
-  if (file) { e.preventDefault(); return captureFile(file); }
+  // Some browsers only expose a pasted image through items, not files.
+  const file = [...(e.clipboardData?.files || [])][0]
+    || [...(e.clipboardData?.items || [])].find((i) => i.kind === 'file')?.getAsFile();
+  if (file) {
+    e.preventDefault();
+    closeOverlay($('#textSheet'));
+    return captureFile(file);
+  }
   const text = e.clipboardData?.getData('text');
   if (text && text.trim().length > 12 && $('#textSheet').hidden) {
     e.preventDefault();
@@ -852,9 +996,12 @@ $('#edSave').addEventListener('click', async () => {
 
 $('#edDelete').addEventListener('click', async () => {
   if (!editing) return;
-  await api('/api/items/bulk', { method: 'POST', body: { op: 'delete', ids: [editing.id] } });
   closeOverlay($('#editor'));
-  toast('Removed');
+  // From the Dates list it gets the same Undo as a swipe. Inside a review the
+  // list is the import's own, so it goes at once, as before.
+  if ($('#review').hidden) return deleteLater(editing.id);
+  await api('/api/items/bulk', { method: 'POST', body: { op: 'delete', ids: [editing.id] } });
+  toast('Deleted');
   await refreshCurrent();
 });
 

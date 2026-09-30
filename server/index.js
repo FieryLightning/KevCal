@@ -161,6 +161,37 @@ function clientOf(req) {
   return req.socket.remoteAddress || 'unknown';
 }
 
+/**
+ * Countries allowed through the door, e.g. KEVCAL_ALLOW_COUNTRIES=US. The
+ * country comes from Cloudflare's CF-IPCountry header, so it is only believed
+ * from a trusted proxy — with nothing vouching for it, a request from outside
+ * is refused rather than guessed about. Someone on the same wifi reaching this
+ * machine directly has no country to check and is let through.
+ *
+ * This is a filter, not a lock: a VPN walks straight past it. What it buys is
+ * the world's background noise — scanners and password-guessers — never
+ * reaching the passcode box at all. Refusals are deliberately not logged: a
+ * log row per bot request would only move the noise into the database.
+ */
+const ALLOW_COUNTRIES = String(process.env.KEVCAL_ALLOW_COUNTRIES || '')
+  .split(',').map((c) => c.trim().toUpperCase()).filter(Boolean);
+
+function isLocalAddress(addr = '') {
+  const a = addr.replace(/^::ffff:/, '');
+  return a === '::1' || /^127\./.test(a) || /^10\./.test(a) || /^192\.168\./.test(a)
+    || /^172\.(1[6-9]|2\d|3[01])\./.test(a) || /^f[cd]/i.test(a) || /^fe80:/i.test(a);
+}
+
+function countryRefused(req, res) {
+  if (!ALLOW_COUNTRIES.length) return false;
+  const proxied = req.headers['x-forwarded-for'] || req.headers['cf-connecting-ip'] || req.headers['cf-ray'];
+  if (!proxied && isLocalAddress(req.socket.remoteAddress)) return false;
+  const country = TRUST_PROXY ? String(req.headers['cf-ipcountry'] || '').trim().toUpperCase() : '';
+  if (country && ALLOW_COUNTRIES.includes(country)) return false;
+  send(res, 403, 'KevCal is not available from here.', { 'content-type': 'text/plain; charset=utf-8' });
+  return true;
+}
+
 /** Whether TLS was terminated in front of us. Only a trusted proxy may assert it. */
 function isHTTPS(req) {
   if (!TRUST_PROXY) return false;
@@ -185,17 +216,89 @@ const SECURITY_HEADERS = {
   'x-frame-options': 'DENY',
 };
 
-const LOCK_PAGE = `<!doctype html><meta charset="utf-8">
+/**
+ * The door. A passcode box, and a plain statement of what this is: a small
+ * private group's tool, where everyone who gets in shares one list. The form
+ * posts to /unlock rather than putting the passcode in the address, so it never
+ * lands in browser history or a proxy log.
+ */
+function lockPage({ wrong = false, limited = false } = {}) {
+  const note = limited ? 'Too many wrong tries. Wait a few minutes and try again.'
+    : wrong ? 'That passcode isn’t right.' : '';
+  return `<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
 <title>KevCal</title>
 <style>
+  :root{color-scheme:light dark;--bg:#fcfbf8;--ink:#15161a;--muted:#71727d;--line:#d5d1c6;
+        --brand:#1b4965;--warn:#8a5a00;--warn-bg:#fdf3de;--warn-line:#e8cd93;--stop:#a8271d}
+  @media (prefers-color-scheme:dark){:root{--bg:#121317;--ink:#ecebe6;--muted:#9c9ca6;--line:#3a3b44;
+        --brand:#7fb3d5;--warn:#e7c07a;--warn-bg:#2d2414;--warn-line:#6b5426;--stop:#e89189}}
   body{font:16px/1.5 -apple-system,system-ui,sans-serif;margin:0;display:grid;place-items:center;
-       min-height:100vh;background:#12121a;color:#e9e9f0;text-align:center;padding:24px}
-  .k{font-size:44px;margin-bottom:8px}
-  p{opacity:.65;max-width:30ch}
+       min-height:100dvh;background:var(--bg);color:var(--ink);padding:24px 16px;box-sizing:border-box}
+  main{width:100%;max-width:360px}
+  h1{font:600 30px/1.1 ui-serif,Georgia,serif;margin:0 0 18px}
+  .warn{background:var(--warn-bg);border:1px solid var(--warn-line);color:var(--warn);
+        border-radius:12px;padding:12px 14px;font-size:14px;margin-bottom:20px}
+  .warn b{display:block;margin-bottom:2px}
+  label{display:block;font-size:13px;font-weight:600;color:var(--muted);margin-bottom:6px}
+  input{box-sizing:border-box;width:100%;font:inherit;font-size:17px;padding:12px 14px;border-radius:12px;
+        border:1px solid var(--line);background:transparent;color:inherit}
+  button{margin-top:12px;width:100%;font:inherit;font-weight:700;padding:13px;border:0;border-radius:12px;
+         background:var(--brand);color:#fff;cursor:pointer}
+  .err{color:var(--stop);font-size:14px;font-weight:600;margin:10px 0 0;min-height:1em}
 </style>
-<div><div class="k">🔒</div><h1>KevCal</h1>
-<p>Add your key to the address to get in — the link on your phone's home screen already has it.</p></div>`;
+<main>
+  <h1>KevCal</h1>
+  <div class="warn" role="note"><b>A private tool for a small group.</b>
+    If you weren’t given the passcode, this isn’t for you. It is only for school
+    and work dates — school calendars, school events, career fairs, work
+    deadlines — and anything else is turned away. Everyone who gets in sees the
+    same list, so don’t add anything you wouldn’t want the group to read.</div>
+  <form method="post" action="/unlock">
+    <label for="k">Passcode</label>
+    <input id="k" name="k" type="password" autocomplete="current-password" autocapitalize="off"
+           autocorrect="off" spellcheck="false" required autofocus>
+    <button type="submit">Open</button>
+    <p class="err" role="alert">${note}</p>
+  </form>
+</main></html>`;
+}
+
+function sendLock(res, status, opts) {
+  // The one page allowed to submit a form, and only to ourselves.
+  res.setHeader('content-security-policy',
+    SECURITY_HEADERS['content-security-policy'].replace("form-action 'none'", "form-action 'self'"));
+  res.setHeader('cache-control', 'no-store');
+  send(res, status, lockPage(opts), { 'content-type': 'text/html; charset=utf-8' });
+}
+
+function grantCookie(req, res) {
+  // Secure whenever a tunnel terminated TLS in front of us, so the cookie
+  // cannot be picked off a plain-HTTP hop later.
+  const https = isHTTPS(req);
+  res.setHeader('set-cookie',
+    `kc_token=${encodeURIComponent(TOKEN)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
+}
+
+/**
+ * The passcode form lands here. Wrong guesses have their own, much tighter
+ * limit than ordinary page loads: this is the one door worth grinding at.
+ */
+async function unlockForm(req, res) {
+  if (!TOKEN) return send(res, 303, '', { location: '/' });
+  if (tooMany(`guess:${clientOf(req)}`, 8, 15 * 60_000)) return sendLock(res, 429, { limited: true });
+  let body = '';
+  for await (const chunk of req) {
+    body += chunk;
+    if (body.length > 4096) return sendLock(res, 413, { wrong: true });
+  }
+  const supplied = (new URLSearchParams(body).get('k') || '').trim();
+  if (!sameToken(supplied, TOKEN)) return sendLock(res, 401, { wrong: true });
+  hits.delete(`guess:${clientOf(req)}`);
+  grantCookie(req, res);
+  send(res, 303, '', { location: '/' });
+}
 
 /**
  * A bearer token in a cookie. Not an identity system and not pretending to be:
@@ -208,20 +311,14 @@ function unlocked(req, res, url) {
     || req.headers['x-kevcal-token']
     || cookies(req).kc_token;
   if (sameToken(supplied || '', TOKEN)) {
-    if (url.searchParams.get('k')) {
-      // Secure whenever a tunnel terminated TLS in front of us, so the cookie
-      // cannot be picked off a plain-HTTP hop later.
-      const https = isHTTPS(req);
-      res.setHeader('set-cookie',
-        `kc_token=${encodeURIComponent(TOKEN)}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`);
-    }
+    if (url.searchParams.get('k')) grantCookie(req, res);
     return true;
   }
   if (tooMany(`auth:${clientOf(req)}`, 20, 10 * 60_000)) {
     return json(res, 429, { error: 'too many attempts — wait a few minutes' }), false;
   }
   if (url.pathname.startsWith('/api/')) json(res, 401, { error: 'unauthorised' });
-  else send(res, 401, LOCK_PAGE, { 'content-type': 'text/html; charset=utf-8' });
+  else sendLock(res, 401);
   return false;
 }
 
@@ -257,6 +354,9 @@ const server = http.createServer(async (req, res) => {
 
     for (const [h, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(h, v);
 
+    if (countryRefused(req, res)) return;
+
+    if (req.method === 'POST' && pathname === '/unlock') return await unlockForm(req, res);
     if (!unlocked(req, res, url)) return;
     if (crossSiteRejected(req, res, pathname)) return;
 
@@ -322,7 +422,7 @@ server.listen(PORT, HOST, () => {
         : ' — no on-device reader on this platform, so there is no offline fallback'}`}`);
   if (TRUST_PROXY) console.log('  Proxy          trusting X-Forwarded-For / -Proto');
   console.log(`  Door           ${TOKEN
-    ? 'locked — the link needs ?k=…'
+    ? 'locked — asks for the passcode (or open the link with ?k=…)'
     : `OPEN to everything on this network${HOST === '127.0.0.1' ? ' (localhost only)' : ''}`}`);
   console.log(`  Data           ${DATA_DIR}`);
   console.log('');
@@ -330,6 +430,19 @@ server.listen(PORT, HOST, () => {
     console.log('  ⚠  No KEVCAL_TOKEN, so anything on your wifi can read what you import.');
     console.log('     Fine at home; NOT fine behind a tunnel. To lock it:');
     console.log(`       echo "KEVCAL_TOKEN=$(openssl rand -base64 24 2>/dev/null || echo change-me)" >> .env`);
+    console.log('');
+  }
+  if (ALLOW_COUNTRIES.length) {
+    console.log(`  Countries      only ${ALLOW_COUNTRIES.join(', ')}${TRUST_PROXY ? ' (from CF-IPCountry)' : ''}`);
+    if (!TRUST_PROXY) {
+      console.log('  ⚠  KEVCAL_ALLOW_COUNTRIES needs KEVCAL_TRUST_PROXY=1 behind Cloudflare.');
+      console.log('     Without it only this wifi gets in; everyone else is refused.');
+    }
+    console.log('');
+  }
+  if (TOKEN && TOKEN.length < 12) {
+    console.log('  ⚠  KEVCAL_TOKEN is short. The door slows guessing down but cannot stop it;');
+    console.log('     use 12+ characters — four random words are easy to share and hard to guess.');
     console.log('');
   }
 });

@@ -70,6 +70,7 @@ function fakeRead() {
         document_span: parsed.document_span ?? null,
         document_title: parsed.document_title ?? null,
         document_kind: parsed.document_kind ?? null,
+        document_purpose: parsed.document_purpose ?? null,
       },
       items: Array.isArray(parsed.items) ? parsed.items : [],
     };
