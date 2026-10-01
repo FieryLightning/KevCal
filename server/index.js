@@ -425,6 +425,7 @@ server.listen(PORT, HOST, () => {
     ? 'locked — asks for the passcode (or open the link with ?k=…)'
     : `OPEN to everything on this network${HOST === '127.0.0.1' ? ' (localhost only)' : ''}`}`);
   console.log(`  Data           ${DATA_DIR}`);
+  console.log('  Use            personal only — your own device, on your home wifi. Never the internet.');
   console.log('');
   if (!TOKEN && HOST !== '127.0.0.1') {
     console.log('  ⚠  No KEVCAL_TOKEN, so anything on your wifi can read what you import.');

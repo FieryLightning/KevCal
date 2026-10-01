@@ -1,5 +1,11 @@
 # Running KevCal somewhere that is always on
 
+> [!WARNING]
+> **Not recommended.** KevCal is for personal use on your own device, on your
+> home wifi (see the README). This guide to running it somewhere reachable from
+> outside is kept for reference only. Exposing KevCal to the internet is
+> entirely at your own risk.
+
 KevCal *is* the machine it runs on. Your phone only ever loads a page the server
 is serving — there is no copy of the app or your data on the phone. So if the
 host sleeps, KevCal is gone until it wakes.

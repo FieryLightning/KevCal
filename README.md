@@ -6,6 +6,18 @@ without it ever quietly inventing the date.**
 School letters, timetables, posters, appointment cards, service reminders,
 screenshots of emails. Photograph it, check what it found, add it.
 
+> [!WARNING]
+> **Personal use only — on your own device, on your home wifi.**
+>
+> Whoever has this code: run KevCal on a computer you own, and open it only from
+> your own devices on the same home wifi. Do not make it reachable from the
+> internet — no tunnel, no port forwarding, no cloud hosting. It was not built
+> or tested for that, and the passcode and other safeguards in it are not
+> enough to make it safe there. Doing so is entirely at your own risk.
+>
+> Your API keys live in `.env` on that computer. It is git-ignored: never
+> commit it, push it or share it.
+
 ---
 
 ## The one idea
