@@ -81,7 +81,7 @@ injection refusal, path traversal, bounded shifts).
 
 ## What the real Caltech PDF says about the fallback
 
-`samples/AcademicCalendar2026-27.pdf` is a genuine two-column academic calendar.
+A genuine two-column university academic calendar (not included in this repo) was tried.
 Through the **on-device fallback** it produces 73 items and gives 27 of them the
 page header as their title, because the PDF's text layer puts the date column and
 the description column in separate blocks and row-grouping cannot recover the
